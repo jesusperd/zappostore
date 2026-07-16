@@ -1723,6 +1723,13 @@ export default function App() {
   };
   useEffect(() => { if (session && session.role === "master") loadVendors(); }, [session]);
 
+  const mapClient = (row) => ({ id: row.id, name: row.name, phone: row.phone, cedula: row.cedula, direccion: row.direccion, createdAt: row.created_at });
+  const loadClients = async () => {
+    const { data, error } = await supabase.from("clientes").select("*").order("created_at", { ascending: true });
+    if (!error) setClients(data.map(mapClient));
+  };
+  useEffect(() => { if (session) loadClients(); }, [session]);
+
   const login = async (cedula, password) => {
     const email = authEmailFor(cedula);
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
@@ -1739,25 +1746,38 @@ export default function App() {
   };
   const logout = async () => { await supabase.auth.signOut(); setSession(null); setRoute("home"); };
 
-  const findOrCreateClient = (c) => {
+  const findOrCreateClient = async (c) => {
     const key = (c.phone || "").trim();
-    const found = key ? clients.find((x) => (x.phone || "").trim() === key) : clients.find((x) => x.name.trim().toLowerCase() === c.name.trim().toLowerCase() && c.name.trim());
+    let found = null;
+    if (key) {
+      const { data } = await supabase.from("clientes").select("*").eq("phone", key).maybeSingle();
+      found = data;
+    } else if (c.name.trim()) {
+      const { data } = await supabase.from("clientes").select("*").ilike("name", c.name.trim()).maybeSingle();
+      found = data;
+    }
     if (found) {
-      setClients((p) => p.map((x) => (x.id === found.id
-        ? { ...x, name: c.name || x.name, phone: c.phone || x.phone, cedula: c.cedula || x.cedula, direccion: c.direccion || x.direccion }
-        : x)));
+      const patch = { name: c.name || found.name, phone: c.phone || found.phone, cedula: c.cedula || found.cedula, direccion: c.direccion || found.direccion };
+      const { data: updated, error } = await supabase.from("clientes").update(patch).eq("id", found.id).select().single();
+      const row = !error && updated ? updated : { ...found, ...patch };
+      setClients((p) => p.map((x) => (x.id === found.id ? mapClient(row) : x)));
       return found.id;
     }
-    const nc = { id: uid(), name: c.name, phone: c.phone, cedula: c.cedula, direccion: c.direccion, createdAt: new Date().toISOString() };
-    setClients((p) => [...p, nc]);
-    return nc.id;
+    const { data: created, error } = await supabase
+      .from("clientes")
+      .insert({ name: c.name, phone: c.phone, cedula: c.cedula, direccion: c.direccion })
+      .select()
+      .single();
+    if (error || !created) { console.error("findOrCreateClient:", error); return null; }
+    setClients((p) => [...p, mapClient(created)]);
+    return created.id;
   };
 
-  const saveSale = (data, existingId) => {
+  const saveSale = async (data, existingId) => {
     // Los presupuestos solo se imprimen: nunca deben tocar sales, payments ni Caja.
     if (data.items.some((i) => i.tipo_operacion === "presupuesto")) return;
 
-    const clientId = findOrCreateClient(data.client);
+    const clientId = await findOrCreateClient(data.client);
     const saleId = existingId || uid();
     const oldSale = existingId ? sales.find((s) => s.id === existingId) : null;
     const oldPayments = oldSale ? (oldSale.data.orderPayments || []) : [];
