@@ -1,5 +1,5 @@
 -- ============================================================================
--- ZappoStore — Esquema PostgreSQL / Supabase (v0.4)
+-- ZappoStore — Esquema PostgreSQL / Supabase (v0.5)
 -- Alineado al modelo real de src/App.jsx a la fecha (login+roles, Vender,
 -- Seguimiento/Kanban, Clientes, Vendedores, Caja, Resumen/Reportes). Cambios
 -- clave respecto a v0.3:
@@ -14,6 +14,11 @@
 --     con métodos distintos). El ledger de pagos soporta REVERSIÓN (corregir un
 --     abono ya guardado sin dejar dinero fantasma en el cuadre de Caja).
 --   • Clientes: se agregaron cedula (Cédula/RIF) y direccion.
+-- Cambios v0.5 (conexión real a Supabase Auth):
+--   • vendedores.auth_user_id vincula el perfil/rol con auth.users. El email de
+--     Auth es sintético (cedula@zappostore.local); nunca lo ve el usuario.
+--   • El master deja de ser un valor hardcodeado en el front — es una fila más
+--     en vendedores con role='master'.
 -- ============================================================================
 create extension if not exists "pgcrypto";
 
@@ -30,15 +35,20 @@ do $$ begin
 exception when duplicate_object then null; end $$;
 
 -- ---------- VENDEDORES (perfil; auth real vía Supabase auth.users) ----------
+-- Login real: el email de Auth es sintético (cedula@zappostore.local, nunca
+-- visible para el usuario). auth_user_id vincula la fila de perfil/rol con la
+-- cuenta de auth.users creada por supabase.auth.signInWithPassword/signUp.
 create table if not exists vendedores (
-  id          uuid primary key default gen_random_uuid(),
-  cedula      text unique not null,          -- usuario de login
-  name        text not null,
-  role        user_role not null default 'vendedor',
-  active      boolean not null default true,
-  created_by  uuid references vendedores(id),
-  created_at  timestamptz not null default now()
+  id           uuid primary key default gen_random_uuid(),
+  auth_user_id uuid unique references auth.users(id) on delete set null,
+  cedula       text unique not null,          -- usuario de login
+  name         text not null,
+  role         user_role not null default 'vendedor',
+  active       boolean not null default true,
+  created_by   uuid references vendedores(id),
+  created_at   timestamptz not null default now()
 );
+create index if not exists idx_vendedores_auth_user on vendedores (auth_user_id);
 
 -- ---------- CLIENTES ----------
 create table if not exists clientes (

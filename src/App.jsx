@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   LogOut, Plus, Trash2, X, Upload, Shirt, Check, ChevronDown,
   ChevronUp, ChevronLeft, User, Phone, CreditCard, Banknote, Smartphone,
@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import { FROG_LOGO } from "./assets/logo.js";
+import { supabase } from "./lib/supabase.js";
 
 // ===CATALOG_START===
 const QUICK_PRODUCTS = [
@@ -104,6 +105,9 @@ const NAV_SOON = [
 const usd = (n) => `$${(n || 0).toFixed(2)}`;
 const bs = (n) => `Bs ${(n || 0).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const uid = () => Math.random().toString(36).slice(2, 9);
+// Supabase Auth exige email; el login real de la app es por cédula. Este email
+// sintético nunca se muestra ni se tipea — solo vincula la cédula con auth.users.
+const authEmailFor = (cedula) => `${cedula.trim().toLowerCase()}@zappostore.local`;
 const measureOf = (it) => Number(it.cantidad) || 0;
 const lineTotal = (it) => measureOf(it) * (Number(it.price) || 0);
 const medida = (it) => `Talla ${it.talla} · ${it.cantidad}u`;
@@ -341,9 +345,12 @@ function LoginScreen({ mode, onLogin, onSwitch }) {
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
-  const submit = () => {
+  const [loading, setLoading] = useState(false);
+  const submit = async () => {
     if (!cedula.trim() || !password.trim()) return setError("Completa cédula y contraseña.");
-    const res = onLogin(cedula.trim(), password);
+    setLoading(true);
+    const res = await onLogin(cedula.trim(), password);
+    setLoading(false);
     if (res && res.error) setError(res.error);
   };
   return (
@@ -378,8 +385,8 @@ function LoginScreen({ mode, onLogin, onSwitch }) {
             </div>
           </div>
           {error && <p data-testid="login-error" className="text-xs text-rose-500">{error}</p>}
-          <button data-testid="btn-login" onClick={submit}
-            className={`w-full text-white font-bold rounded-xl py-3 text-sm ${isMaster ? "bg-rose-500 hover:bg-rose-600" : "bg-emerald-500 hover:bg-emerald-600"}`}>Ingresar</button>
+          <button data-testid="btn-login" onClick={submit} disabled={loading}
+            className={`w-full text-white font-bold rounded-xl py-3 text-sm disabled:opacity-60 ${isMaster ? "bg-rose-500 hover:bg-rose-600" : "bg-emerald-500 hover:bg-emerald-600"}`}>{loading ? "Ingresando..." : "Ingresar"}</button>
         </div>
         <button data-testid="btn-switch-login" onClick={onSwitch} className="w-full text-center text-slate-400 text-xs mt-4 underline">
           {isMaster ? "Volver a login de vendedor" : "Entrar como Supervisor (Master)"}
@@ -1251,17 +1258,27 @@ function ClienteDetail({ session, clientId, sales, clients, onBack, onView }) {
 function VendedoresScreen({ vendors, sales, onAdd, onToggle, onOpen }) {
   const [form, setForm] = useState({ name: "", cedula: "", password: "" });
   const [showForm, setShowForm] = useState(false);
-  const add = () => { if (!form.name.trim() || !form.cedula.trim() || !form.password.trim()) return; onAdd(form); setForm({ name: "", cedula: "", password: "" }); setShowForm(false); };
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const add = async () => {
+    if (!form.name.trim() || !form.cedula.trim() || !form.password.trim()) return;
+    setSaving(true); setError("");
+    const res = await onAdd(form);
+    setSaving(false);
+    if (res && res.error) { setError(res.error); return; }
+    setForm({ name: "", cedula: "", password: "" }); setShowForm(false);
+  };
   return (
     <div className="min-h-screen bg-slate-50" style={{ fontFamily: "system-ui, sans-serif" }}>
-      <TopBar title="Vendedores" right={<button data-testid="btn-add-vendor" onClick={() => setShowForm((s) => !s)} className="bg-emerald-500 rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-1"><Plus className="w-3.5 h-3.5" /> Nuevo</button>} />
+      <TopBar title="Vendedores" right={<button data-testid="btn-add-vendor" onClick={() => { setShowForm((s) => !s); setError(""); }} className="bg-emerald-500 rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-1"><Plus className="w-3.5 h-3.5" /> Nuevo</button>} />
       <main className="max-w-lg mx-auto px-4 py-4 space-y-2">
         {showForm && (
           <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2" data-testid="vendor-form">
             <input data-testid="vendor-name" placeholder="Nombre" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
             <input data-testid="vendor-cedula" placeholder="Cédula (usuario)" value={form.cedula} onChange={(e) => setForm({ ...form, cedula: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
-            <input data-testid="vendor-password" placeholder="Contraseña" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
-            <button data-testid="btn-save-vendor" onClick={add} className="w-full bg-emerald-500 text-white font-bold rounded-lg py-2 text-sm">Guardar vendedor</button>
+            <input data-testid="vendor-password" placeholder="Contraseña (mín. 6 caracteres)" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
+            {error && <p data-testid="vendor-form-error" className="text-xs text-rose-500">{error}</p>}
+            <button data-testid="btn-save-vendor" onClick={add} disabled={saving} className="w-full bg-emerald-500 text-white font-bold rounded-lg py-2 text-sm disabled:opacity-60">{saving ? "Creando..." : "Guardar vendedor"}</button>
           </div>
         )}
         {vendors.map((v) => {
@@ -1662,14 +1679,13 @@ function ReportesScreen({ sales, clients, vendors, onOpenClient, onOpenVendor })
   );
 }
 
-const MASTER = { cedula: "master", password: "master", name: "Supervisor" };
-
 export default function App() {
   const [loginMode, setLoginMode] = useState("vendedor");
   const [session, setSession] = useState(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [route, setRoute] = useState("home");
   const [rate, setRate] = useState(40.5);
-  const [vendors, setVendors] = useState([{ id: "v1", name: "Ana Vendedora", cedula: "V-1", password: "1234", active: true }]);
+  const [vendors, setVendors] = useState([]);
   const [clients, setClients] = useState([]);
   const [sales, setSales] = useState([]);
   const [payments, setPayments] = useState([]);
@@ -1680,17 +1696,48 @@ export default function App() {
   const [openVendor, setOpenVendor] = useState(null);
   const folioRef = useRef(1);
 
-  const login = (cedula, password) => {
-    if (loginMode === "master") {
-      if (cedula === MASTER.cedula && password === MASTER.password) { setSession({ role: "master", id: "master", name: MASTER.name, cedula }); setRoute("home"); return; }
-      return { error: "Credenciales de master inválidas." };
+  const sessionFromVendedor = (v) => ({ role: v.role, id: v.id, name: v.name, cedula: v.cedula });
+
+  // Restaura la sesión si ya había un login válido de Supabase (sobrevive a refrescar la página).
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      if (authSession && authSession.user) {
+        const { data: vendedor } = await supabase.from("vendedores").select("*").eq("auth_user_id", authSession.user.id).single();
+        if (active && vendedor && vendedor.active) {
+          setSession(sessionFromVendedor(vendedor));
+          setLoginMode(vendedor.role === "master" ? "master" : "vendedor");
+        }
+      }
+      if (active) setSessionChecked(true);
+    })();
+    return () => { active = false; };
+  }, []);
+
+  const loadVendors = async () => {
+    const { data, error } = await supabase.from("vendedores").select("*").order("created_at", { ascending: true });
+    if (!error) {
+      setVendors(data.map((v) => ({ id: v.id, name: v.name, cedula: v.cedula, active: v.active, role: v.role, authUserId: v.auth_user_id, createdBy: v.created_by })));
     }
-    let v = vendors.find((x) => x.cedula.toLowerCase() === cedula.toLowerCase());
-    if (v && !v.active) return { error: "Vendedor inactivo. Contacta al supervisor." };
-    if (!v) { v = { id: uid(), name: "Vendedor", cedula, password, active: true }; setVendors((p) => [...p, v]); }
-    setSession({ role: "vendedor", id: v.id, name: v.name, cedula: v.cedula }); setRoute("home");
   };
-  const logout = () => { setSession(null); setRoute("home"); };
+  useEffect(() => { if (session && session.role === "master") loadVendors(); }, [session]);
+
+  const login = async (cedula, password) => {
+    const email = authEmailFor(cedula);
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return { error: "Credenciales inválidas." };
+
+    const { data: vendedor, error: vendedorErr } = await supabase.from("vendedores").select("*").eq("auth_user_id", data.user.id).single();
+    if (vendedorErr || !vendedor) { await supabase.auth.signOut(); return { error: "No se encontró un perfil para este usuario." }; }
+    if (!vendedor.active) { await supabase.auth.signOut(); return { error: "Vendedor inactivo. Contacta al supervisor." }; }
+    if (loginMode === "master" && vendedor.role !== "master") { await supabase.auth.signOut(); return { error: "Estas credenciales no son de supervisor." }; }
+    if (loginMode === "vendedor" && vendedor.role !== "vendedor") { await supabase.auth.signOut(); return { error: "Usá el acceso de Supervisor para esta cuenta." }; }
+
+    setSession(sessionFromVendedor(vendedor));
+    setRoute("home");
+  };
+  const logout = async () => { await supabase.auth.signOut(); setSession(null); setRoute("home"); };
 
   const findOrCreateClient = (c) => {
     const key = (c.phone || "").trim();
@@ -1792,9 +1839,31 @@ export default function App() {
     return { ...s, data: { ...s.data, items }, audit: [...s.audit, { ts: new Date().toISOString(), user: session.name, action: `Proceso de ${categoria}`, detail: `${it.name} · ${lbl} → ${isDone ? "pendiente" : "completado"}` }] };
   }));
 
-  const addVendor = (v) => setVendors((p) => [...p, { id: uid(), ...v, active: true, createdBy: session.id }]);
-  const toggleVendor = (id) => setVendors((p) => p.map((v) => (v.id === id ? { ...v, active: !v.active } : v)));
+  // Alta real de vendedores ("manager de apertura"): la Edge Function create-vendor
+  // hace, del lado del servidor, lo que el navegador nunca podría hacer con la anon
+  // key (crear la cuenta de Auth) y valida que quien llama sea un master activo.
+  const addVendor = async (v) => {
+    const { data, error } = await supabase.functions.invoke("create-vendor", {
+      body: { cedula: v.cedula, password: v.password, name: v.name },
+    });
+    if (error) return { error: error.message || "No se pudo crear el vendedor." };
+    if (data && data.error) return { error: data.error };
+    await loadVendors();
+  };
+  const toggleVendor = async (id) => {
+    const target = vendors.find((v) => v.id === id);
+    if (!target) return;
+    const { error } = await supabase.from("vendedores").update({ active: !target.active }).eq("id", id);
+    if (!error) setVendors((p) => p.map((v) => (v.id === id ? { ...v, active: !v.active } : v)));
+  };
 
+  if (!sessionChecked) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <Wordmark size="text-2xl" flicker />
+      </div>
+    );
+  }
   if (!session) return <LoginScreen mode={loginMode} onLogin={login} onSwitch={() => setLoginMode((m) => (m === "master" ? "vendedor" : "master"))} />;
 
   const nav = (id) => { setRoute(id); setOpenClient(null); setOpenVendor(null); };
