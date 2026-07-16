@@ -1,6 +1,18 @@
 # CONTEXTO.md — ZappoStore
 
-> Archivo de handoff. Es la **única fuente de verdad** del pre-proyecto (no está alojado en ningún repo). Para retomar en otra sesión: abrí un chat nuevo, subí el proyecto (o al menos `src/App.jsx`, `schema.sql` y este archivo) y pegá el bloque **"Resumen para retomar"**.
+> Archivo de handoff. Es la **única fuente de verdad** del pre-proyecto (ahora sí versionado en GitHub: `github.com/jesusperd/zappostore`). Para retomar en otra sesión: abrí un chat nuevo, subí el proyecto (o al menos `src/App.jsx`, `schema.sql` y este archivo) y pegá el bloque **"Resumen para retomar"**.
+
+---
+
+## 🔜 Para mañana — arrancar por acá
+
+Estado exacto en el que quedó todo al cerrar hoy (2026-07-16):
+- ✅ Supabase conectado de verdad: login/roles/vendedores funcionando contra la base real, con RLS base activa y verificada (ver Changelog v1.0).
+- ✅ Todo commiteado y pusheado a `main` (`ef97425` es el último commit).
+- ⏭️ **Pendiente de vos, antes de seguir con código**: confirmar si ya corriste el deploy de la Edge Function (`npx supabase login && npx supabase link --project-ref aqtaphhhomlbafelekiz && npx supabase functions deploy create-vendor`, ver sección "Cómo correr el proyecto"). Si no lo hiciste, el botón "Nuevo vendedor" en la pantalla Vendedores va a fallar (el resto de la app anda igual sin eso).
+- ⏭️ **La tarea grande de la próxima sesión**: migrar Vender/Seguimiento/Caja/Clientes/pagos de `useState` en memoria a Supabase real — hoy solo login y vendedores son reales, todo lo demás se pierde al refrescar la página. Es la tarea #8 del tracker interno y la más grande que queda; necesita el mismo cuidado que tuvo el ledger de pagos con reversión (v0.8) porque ahí es donde vive la lógica anti-fuga-de-dinero. Sugerencia de orden: (1) `clientes`, (2) `pedidos`+`pedido_items`+`pagos` (el núcleo de Vender/Seguimiento), (3) `cajas`, dejando Resumen/Reportes para el final ya que solo leen de las anteriores.
+- El servidor de dev (`npm run dev`) no quedó corriendo entre sesiones — arrancalo de nuevo vos o pedímelo.
+- Los 2 usuarios sembrados (master `1234567`, vendedor `95414372`) siguen activos en la base — no hace falta recrearlos.
 
 ---
 
