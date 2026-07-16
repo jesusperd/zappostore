@@ -1730,6 +1730,19 @@ export default function App() {
   };
   useEffect(() => { if (session) loadClients(); }, [session]);
 
+  const mapCaja = (row) => ({
+    id: row.id, vendorId: row.vendedor_id, vendorName: row.vendedores ? row.vendedores.name : "",
+    openedAt: row.opened_at, closedAt: row.closed_at,
+    openingCashUSD: Number(row.opening_cash_usd) || 0, openingCashVES: Number(row.opening_cash_ves) || 0,
+    rateAtOpen: row.rate_open, closingCashUSD: row.closing_cash_usd, closingCashVES: row.closing_cash_ves,
+    rateAtClose: row.rate_close, expectedCashUSD: row.expected_cash_usd, varianceUSD: row.variance_usd,
+  });
+  const loadCajas = async () => {
+    const { data, error } = await supabase.from("cajas").select("*, vendedores(name)").order("opened_at", { ascending: false });
+    if (!error) setCajas(data.map(mapCaja));
+  };
+  useEffect(() => { if (session) loadCajas(); }, [session]);
+
   const login = async (cedula, password) => {
     const email = authEmailFor(cedula);
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
@@ -1824,19 +1837,32 @@ export default function App() {
     setEditSale(null); setRoute("seguimiento");
   };
 
-  const openCaja = (cashUSD, cashVES) => {
-    setCajas((p) => [...p, { id: uid(), vendorId: session.id, vendorName: session.name, openedAt: new Date().toISOString(), closedAt: null, openingCashUSD: Number(cashUSD) || 0, openingCashVES: Number(cashVES) || 0, rateAtOpen: rate, closingCashUSD: null, closingCashVES: null, rateAtClose: null, expectedCashUSD: null, varianceUSD: null }]);
+  const openCaja = async (cashUSD, cashVES) => {
+    const { data, error } = await supabase
+      .from("cajas")
+      .insert({ vendedor_id: session.id, opening_cash_usd: Number(cashUSD) || 0, opening_cash_ves: Number(cashVES) || 0, rate_open: rate })
+      .select("*, vendedores(name)")
+      .single();
+    if (!error) setCajas((p) => [mapCaja(data), ...p]);
   };
-  const closeCaja = (cajaId, countedUSD, countedVES) => {
-    setCajas((prev) => prev.map((c) => {
-      if (c.id !== cajaId) return c;
-      const myPayments = paymentsOfCaja(payments, cajaId);
-      const cashInUSD = myPayments.filter((p) => p.method === "efectivo_usd").reduce((s, p) => s + p.amountUSD, 0);
-      const cashInVES = myPayments.filter((p) => p.method === "efectivo_bs").reduce((s, p) => s + p.amountUSD, 0);
-      const expectedCashUSD = c.openingCashUSD + (c.openingCashVES / (rate || 1)) + cashInUSD + cashInVES;
-      const countedTotalUSD = (Number(countedUSD) || 0) + (Number(countedVES) || 0) / (rate || 1);
-      return { ...c, closedAt: new Date().toISOString(), closingCashUSD: Number(countedUSD) || 0, closingCashVES: Number(countedVES) || 0, rateAtClose: rate, expectedCashUSD, varianceUSD: countedTotalUSD - expectedCashUSD };
-    }));
+  const closeCaja = async (cajaId, countedUSD, countedVES) => {
+    const c = cajas.find((x) => x.id === cajaId);
+    if (!c) return;
+    const myPayments = paymentsOfCaja(payments, cajaId);
+    const cashInUSD = myPayments.filter((p) => p.method === "efectivo_usd").reduce((s, p) => s + p.amountUSD, 0);
+    const cashInVES = myPayments.filter((p) => p.method === "efectivo_bs").reduce((s, p) => s + p.amountUSD, 0);
+    const expectedCashUSD = c.openingCashUSD + (c.openingCashVES / (rate || 1)) + cashInUSD + cashInVES;
+    const countedTotalUSD = (Number(countedUSD) || 0) + (Number(countedVES) || 0) / (rate || 1);
+    const { data, error } = await supabase
+      .from("cajas")
+      .update({
+        closed_at: new Date().toISOString(), closing_cash_usd: Number(countedUSD) || 0, closing_cash_ves: Number(countedVES) || 0,
+        rate_close: rate, expected_cash_usd: expectedCashUSD, variance_usd: countedTotalUSD - expectedCashUSD,
+      })
+      .eq("id", cajaId)
+      .select("*, vendedores(name)")
+      .single();
+    if (!error) setCajas((prev) => prev.map((x) => (x.id === cajaId ? mapCaja(data) : x)));
   };
 
   const setItemState = (saleId, itemId, estado) => setSales((prev) => prev.map((s) => {
