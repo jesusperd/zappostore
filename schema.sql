@@ -1,5 +1,5 @@
 -- ============================================================================
--- ZappoStore — Esquema PostgreSQL / Supabase (v0.7)
+-- ZappoStore — Esquema PostgreSQL / Supabase (v0.8)
 -- Alineado al modelo real de src/App.jsx a la fecha (login+roles, Vender,
 -- Seguimiento/Kanban, Clientes, Vendedores, Caja, Resumen/Reportes). Cambios
 -- clave respecto a v0.3:
@@ -28,6 +28,10 @@
 --     sube a {pedido_item_id}/{vista}/{uuid}.jpg y pedido_item_fotos.storage_path
 --     guarda ese path. Se sirven con URLs firmadas (createSignedUrls), nunca
 --     públicas — solo un vendedor/master activo puede subir/ver/borrar.
+-- Cambios v0.8 (tasa de cambio compartida):
+--   • exchange_rates pasó de useState local (una tasa distinta por navegador)
+--     a compartida de verdad; el cambio pasa por set_active_rate() para que
+--     sea atómico entre vendedores.
 -- ============================================================================
 create extension if not exists "pgcrypto";
 
@@ -331,8 +335,31 @@ do $$ begin create policy "pagos_insert" on pagos for insert with check (owns_pe
 do $$ begin create policy "audit_log_select" on audit_log for select using (is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
 do $$ begin create policy "audit_log_insert" on audit_log for insert with check (is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
 
--- exchange_rates / products / inventory_movements: RLS habilitada, sin
--- políticas todavía (deny-all) — la app no las usa desde el front hoy.
+-- exchange_rates: tasa USD->Bs COMPARTIDA entre todos los vendedores/master
+-- (antes vivía como useState local en el navegador de cada uno, dando totales
+-- en Bs inconsistentes entre ventas simultáneas de dos vendedores distintos).
+-- Solo lectura directa vía RLS; el cambio de tasa pasa SIEMPRE por
+-- set_active_rate() para que "desactivar la vieja + insertar la nueva" sea
+-- atómico (evita que dos cambios de tasa al mismo tiempo choquen contra el
+-- índice único parcial uq_rate_active).
+do $$ begin create policy "exchange_rates_select_active" on exchange_rates for select using (is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+
+create or replace function set_active_rate(new_rate numeric) returns exchange_rates
+language plpgsql security definer set search_path = public as $$
+declare
+  result exchange_rates;
+begin
+  if not is_active_vendedor(auth.uid()) then
+    raise exception 'No autorizado';
+  end if;
+  update exchange_rates set is_active = false where is_active = true;
+  insert into exchange_rates (usd_to_ves, is_active) values (new_rate, true) returning * into result;
+  return result;
+end;
+$$;
+
+-- products / inventory_movements: RLS habilitada, sin políticas todavía
+-- (deny-all) — la app no las usa desde el front hoy.
 
 -- ============================================================================
 -- VISTAS

@@ -752,7 +752,7 @@ function ProductPicker({ onPick, onClose }) {
   );
 }
 
-function SellScreen({ session, rate, setRate, initialSale, onExit, onSaved }) {
+function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, onSaved }) {
   const editingExisting = !!initialSale;
   const [online, setOnline] = useState(true);
   const [items, setItems] = useState(initialSale ? initialSale.data.items : []);
@@ -803,7 +803,8 @@ function SellScreen({ session, rate, setRate, initialSale, onExit, onSaved }) {
           </div>
           <div className="flex items-center gap-1 bg-slate-800 rounded-lg px-2 py-1.5">
             <span className="text-[10px] text-slate-400">$=</span>
-            <input data-testid="input-rate" type="number" value={rate} onChange={(e) => setRate(Number(e.target.value) || 0)} className="w-11 bg-transparent text-emerald-400 font-bold text-xs outline-none" />
+            <input data-testid="input-rate" type="number" value={rate} onChange={(e) => setRate(Number(e.target.value) || 0)}
+              onBlur={(e) => onRateBlur && onRateBlur(Number(e.target.value) || 0)} className="w-11 bg-transparent text-emerald-400 font-bold text-xs outline-none" />
           </div>
           <button data-testid="btn-toggle-online" onClick={() => setOnline((o) => !o)} className={online ? "text-emerald-400" : "text-rose-400"}>{online ? <RefreshCw className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}</button>
         </div>
@@ -1831,6 +1832,21 @@ export default function App() {
   };
   useEffect(() => { if (session) loadPayments(); }, [session]);
 
+  // Tasa de cambio compartida entre TODOS los vendedores/master (antes era un useState local:
+  // cada navegador podía tener una tasa distinta, dando totales en Bs inconsistentes entre ventas
+  // simultáneas de dos vendedores). set_active_rate es una función atómica (desactiva la vieja +
+  // inserta la nueva en una sola transacción) para que dos cambios de tasa al mismo tiempo no choquen.
+  const loadRate = async () => {
+    const { data } = await supabase.from("exchange_rates").select("usd_to_ves").eq("is_active", true).maybeSingle();
+    if (data) setRate(Number(data.usd_to_ves));
+  };
+  useEffect(() => { if (session) loadRate(); }, [session]);
+  const persistRate = async (newRate) => {
+    const { data, error } = await supabase.rpc("set_active_rate", { new_rate: newRate });
+    if (error) { console.error("persistRate:", error); return; }
+    setRate(Number(data.usd_to_ves));
+  };
+
   const login = async (cedula, password) => {
     const email = authEmailFor(cedula);
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
@@ -2094,7 +2110,7 @@ export default function App() {
       <Sidebar route={route} setRoute={nav} session={session} onLogout={logout} />
       <div className="flex-1 overflow-auto">
         {route === "home" && <HomeScreen session={session} sales={sales} setRoute={nav} />}
-        {route === "sell" && <SellScreen session={session} rate={rate} setRate={setRate} initialSale={editSale} onExit={() => { setEditSale(null); setRoute("home"); }} onSaved={saveSale} />}
+        {route === "sell" && <SellScreen session={session} rate={rate} setRate={setRate} onRateBlur={persistRate} initialSale={editSale} onExit={() => { setEditSale(null); setRoute("home"); }} onSaved={saveSale} />}
         {route === "seguimiento" && <SeguimientoScreen session={session} sales={sales} onSetItemState={setItemState} onToggleProceso={toggleProceso} onView={(s) => setViewSale(s)} onEdit={(s) => { setEditSale(s); setRoute("sell"); }} />}
         {route === "clientes" && (openClient
           ? <ClienteDetail session={session} clientId={openClient} sales={sales} clients={clients} onBack={() => setOpenClient(null)} onView={(s) => setViewSale(s)} />
