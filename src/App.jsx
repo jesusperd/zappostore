@@ -105,6 +105,9 @@ const NAV_SOON = [
 const usd = (n) => `$${(n || 0).toFixed(2)}`;
 const bs = (n) => `Bs ${(n || 0).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const uid = () => Math.random().toString(36).slice(2, 9);
+// UUID real (no el uid() corto de arriba): lo necesitan las columnas uuid de Postgres,
+// como pagos.order_payment_id, generado client-side para poder revertir el pago exacto.
+const newUuid = () => crypto.randomUUID();
 // Supabase Auth exige email; el login real de la app es por cédula. Este email
 // sintético nunca se muestra ni se tipea — solo vincula la cédula con auth.users.
 const authEmailFor = (cedula) => `${cedula.trim().toLowerCase()}@zappostore.local`;
@@ -146,11 +149,6 @@ function optimizeImage(file, dim = 260) {
 }
 
 // ---- Caja: helpers de pagos y turnos ----
-function makePaymentEvent({ saleId, itemId, orderPaymentId, vendorId, vendorName, method, amountUSD, rate, reference, cajaId }) {
-  const m = PAY_METHODS.find((x) => x.id === method);
-  const currency = m ? m.currency : "USD";
-  return { id: uid(), saleId, itemId, orderPaymentId, vendorId, vendorName, method, amountUSD, amountRaw: currency === "VES" ? amountUSD * rate : amountUSD, currency, rateSnap: rate, reference: reference || "", createdAt: new Date().toISOString(), cajaId };
-}
 function openCajaOf(cajas, vendorId) { return cajas.find((c) => c.vendorId === vendorId && !c.closedAt) || null; }
 function salesOfCaja(sales, cajaId) { return sales.filter((s) => s.cajaId === cajaId); }
 function paymentsOfCaja(payments, cajaId) { return payments.filter((p) => p.cajaId === cajaId); }
@@ -655,7 +653,7 @@ function PaymentPanel({ total, rate, payments, onAdd, onRemove }) {
     const raw = Number(amount) || 0;
     if (raw <= 0 || refMissing) return;
     const amountUSD = payConverted({ method, paid: raw }, rate);
-    onAdd({ id: uid(), method, paid: raw, reference, amountUSD, currency: methodObj.currency });
+    onAdd({ id: newUuid(), method, paid: raw, reference, amountUSD, currency: methodObj.currency });
     setAmount(""); setReference(""); setAdding(false);
   };
 
@@ -763,6 +761,7 @@ function SellScreen({ session, rate, setRate, initialSale, onExit, onSaved }) {
   const [isNew, setIsNew] = useState(true);
   const [showPicker, setShowPicker] = useState(false);
   const [showComanda, setShowComanda] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const total = useMemo(() => items.reduce((s, i) => s + lineTotal(i), 0), [items]);
   const paidUSD = useMemo(() => orderPayments.reduce((s, p) => s + p.amountUSD, 0), [orderPayments]);
@@ -903,7 +902,8 @@ function SellScreen({ session, rate, setRate, initialSale, onExit, onSaved }) {
       {showPicker && <ProductPicker onPick={startNew} onClose={() => setShowPicker(false)} />}
       {showComanda && (
         <ComandaModal session={session} data={buildData()} saleMeta={initialSale} onClose={() => setShowComanda(false)} readOnly={hasPresupuesto}
-          onFinalize={() => onSaved(buildData(), initialSale ? initialSale.id : null)} />
+          saving={saving}
+          onFinalize={async () => { setSaving(true); await onSaved(buildData(), initialSale ? initialSale.id : null); setSaving(false); }} />
       )}
     </div>
   );
@@ -930,7 +930,7 @@ function ProcesoChecklist({ label, Icon, procesos, done, catalog }) {
   );
 }
 
-function ComandaModal({ session, data, onClose, onFinalize, readOnly, saleMeta }) {
+function ComandaModal({ session, data, onClose, onFinalize, readOnly, saleMeta, saving }) {
   const { items, client, orderPayments, total, rate, paidUSD, balance } = data;
   const [tab, setTab] = useState("comanda");
   const grupos = [
@@ -1080,7 +1080,7 @@ function ComandaModal({ session, data, onClose, onFinalize, readOnly, saleMeta }
             <div className="flex gap-2 pt-1 print:hidden">
               <button data-testid="btn-print-comanda" onClick={() => window.print()} className="flex-1 border border-slate-200 rounded-xl py-3 text-sm font-medium text-slate-600 flex items-center justify-center gap-1.5"><Printer className="w-4 h-4" /> Imprimir</button>
               {readOnly ? <button data-testid="btn-close-view" onClick={onClose} className="flex-1 bg-slate-900 text-white font-bold rounded-xl py-3 text-sm">Cerrar</button>
-                : <button data-testid="btn-save-sale" onClick={onFinalize} className="flex-1 bg-emerald-500 text-white font-bold rounded-xl py-3 text-sm">{saleMeta ? "Guardar cambios" : "Guardar venta"}</button>}
+                : <button data-testid="btn-save-sale" onClick={onFinalize} disabled={saving} className="flex-1 bg-emerald-500 text-white font-bold rounded-xl py-3 text-sm disabled:opacity-60">{saving ? "Guardando..." : (saleMeta ? "Guardar cambios" : "Guardar venta")}</button>}
             </div>
           </div>
         )}
@@ -1694,7 +1694,6 @@ export default function App() {
   const [editSale, setEditSale] = useState(null);
   const [openClient, setOpenClient] = useState(null);
   const [openVendor, setOpenVendor] = useState(null);
-  const folioRef = useRef(1);
 
   const sessionFromVendedor = (v) => ({ role: v.role, id: v.id, name: v.name, cedula: v.cedula });
 
@@ -1742,6 +1741,81 @@ export default function App() {
     if (!error) setCajas(data.map(mapCaja));
   };
   useEffect(() => { if (session) loadCajas(); }, [session]);
+
+  const mapPedidoItem = (it) => {
+    const designData = { frente: { photos: [], notes: "" }, espalda: { photos: [], notes: "" }, mangas: { photos: [], notes: "" } };
+    (it.pedido_item_diseno || []).forEach((d) => { if (designData[d.vista]) designData[d.vista].notes = d.notes || ""; });
+    const catalog = QUICK_PRODUCTS.find((p) => p.id === it.product_id);
+    return {
+      id: it.id, productId: it.product_id, name: it.name, emoji: catalog ? catalog.emoji : "📦",
+      talla: it.talla || "M", cantidad: Number(it.cantidad) || 1, color: it.color || "",
+      price: Number(it.unit_price) || 0, tipo_operacion: it.operacion_tipo,
+      procesos_taller: it.procesos_taller || [], procesos_diseno: it.procesos_diseno || [],
+      procesos_taller_done: it.procesos_taller_done || [], procesos_diseno_done: it.procesos_diseno_done || [],
+      zones: it.zones || [], designData, estado: it.estado,
+    };
+  };
+  // Reconstruye los abonos VIGENTES desde el ledger append-only: agrupa por order_payment_id
+  // y suma amount_usd — un pago revertido netea a ~0 y se excluye (el reverso es una fila
+  // aparte con el mismo order_payment_id y amount_usd negativo, ver v0.8).
+  const reconstructOrderPayments = (pagoRows) => {
+    const groups = {};
+    (pagoRows || []).forEach((p) => { (groups[p.order_payment_id] ||= []).push(p); });
+    return Object.entries(groups)
+      .map(([orderPaymentId, rows]) => {
+        const net = rows.reduce((s, r) => s + Number(r.amount_usd), 0);
+        const original = rows.find((r) => !r.is_reversal) || rows[0];
+        return { id: orderPaymentId, method: original.method, paid: Number(original.amount), reference: original.reference_number || "", amountUSD: net, currency: original.currency };
+      })
+      .filter((p) => p.amountUSD > 0.009);
+  };
+  const mapSale = (row, audit) => {
+    const items = (row.pedido_items || []).map(mapPedidoItem);
+    const orderPayments = reconstructOrderPayments(row.pagos);
+    const total = Number(row.total);
+    const paidUSD = orderPayments.reduce((s, p) => s + p.amountUSD, 0);
+    const balance = Math.max(0, total - paidUSD);
+    return {
+      id: row.id, folio: row.folio, createdAt: row.created_at, vendorId: row.vendedor_id,
+      vendorName: row.vendedores ? row.vendedores.name : "", clientId: row.cliente_id, cajaId: row.caja_id,
+      data: {
+        items,
+        client: row.clientes ? { name: row.clientes.name || "", phone: row.clientes.phone || "", cedula: row.clientes.cedula || "", direccion: row.clientes.direccion || "" } : { name: "", phone: "", cedula: "", direccion: "" },
+        orderPayments, total, rate: Number(row.rate_snap), paidUSD, balance,
+      },
+      audit,
+    };
+  };
+  const loadSales = async () => {
+    const { data, error } = await supabase
+      .from("pedidos")
+      .select("*, clientes(name, phone, cedula, direccion), vendedores(name), pedido_items(*, pedido_item_diseno(*)), pagos(*)")
+      .order("created_at", { ascending: false });
+    if (error) { console.error("loadSales:", error); return; }
+    const pedidoIds = data.map((r) => r.id);
+    const { data: auditRows } = pedidoIds.length
+      ? await supabase.from("audit_log").select("*").eq("entity", "pedido").in("entity_id", pedidoIds).order("created_at", { ascending: true })
+      : { data: [] };
+    const auditByPedido = {};
+    (auditRows || []).forEach((a) => { (auditByPedido[a.entity_id] ||= []).push({ ts: a.created_at, user: a.user_name, action: a.action, detail: a.detail }); });
+    setSales(data.map((row) => mapSale(row, auditByPedido[row.id] || [])));
+  };
+  useEffect(() => { if (session) loadSales(); }, [session]);
+
+  // payments queda como cache local de la tabla pagos (igual que sales/clients/cajas) para que
+  // cajaTotals/CajaBreakdown/Resumen/Reportes sigan funcionando sin cambios — antes se mutaba a
+  // mano en memoria, ahora se sincroniza con Supabase vía load* + refetch después de cada guardado.
+  const mapPayment = (row) => ({
+    id: row.id, saleId: row.pedido_id, itemId: null, orderPaymentId: row.order_payment_id,
+    vendorId: row.created_by, vendorName: "", method: row.method, amountUSD: Number(row.amount_usd),
+    amountRaw: Number(row.amount), currency: row.currency, rateSnap: Number(row.rate_snap),
+    reference: row.reference_number || "", createdAt: row.created_at, cajaId: row.caja_id,
+  });
+  const loadPayments = async () => {
+    const { data, error } = await supabase.from("pagos").select("*").order("created_at", { ascending: true });
+    if (!error) setPayments(data.map(mapPayment));
+  };
+  useEffect(() => { if (session) loadPayments(); }, [session]);
 
   const login = async (cedula, password) => {
     const email = authEmailFor(cedula);
@@ -1791,49 +1865,94 @@ export default function App() {
     if (data.items.some((i) => i.tipo_operacion === "presupuesto")) return;
 
     const clientId = await findOrCreateClient(data.client);
-    const saleId = existingId || uid();
-    const oldSale = existingId ? sales.find((s) => s.id === existingId) : null;
-    const oldPayments = oldSale ? (oldSale.data.orderPayments || []) : [];
-    const oldById = new Map(oldPayments.map((p) => [p.id, p]));
-    const newById = new Map(data.orderPayments.map((p) => [p.id, p]));
     const myCaja = openCajaOf(cajas, session.id);
+    const oldSale = existingId ? sales.find((s) => s.id === existingId) : null;
+    const oldItems = oldSale ? oldSale.data.items : [];
+    const oldItemIds = new Set(oldItems.map((i) => i.id));
+    const newItemIds = new Set(data.items.map((i) => i.id));
+    const oldPayments = oldSale ? oldSale.data.orderPayments : [];
+    const oldPaymentIds = new Set(oldPayments.map((p) => p.id));
+    const newPaymentIds = new Set(data.orderPayments.map((p) => p.id));
 
-    // Pagos agregados desde el último guardado: se registran en el ledger tal cual, vinculados
-    // a su orderPaymentId para poder revertirlos con exactitud si luego se quitan.
-    const addedEvents = data.orderPayments
-      .filter((p) => !oldById.has(p.id))
-      .map((p) => makePaymentEvent({ saleId, itemId: null, orderPaymentId: p.id, vendorId: session.id, vendorName: session.name, method: p.method, amountUSD: p.amountUSD, rate: data.rate, reference: p.reference, cajaId: myCaja ? myCaja.id : null }));
+    const itemPayload = (it) => ({
+      name: it.name, talla: it.talla, cantidad: it.cantidad, color: it.color, unit_price: it.price,
+      line_total: lineTotal(it), operacion_tipo: it.tipo_operacion,
+      procesos_taller: it.procesos_taller, procesos_taller_done: it.procesos_taller_done,
+      procesos_diseno: it.procesos_diseno, procesos_diseno_done: it.procesos_diseno_done,
+      zones: it.zones, estado: it.estado,
+    });
+    const syncDesignNotes = async (pedidoItemId, designData, isExisting) => {
+      for (const [vista, d] of Object.entries(designData)) {
+        if (d.notes && d.notes.trim()) {
+          await supabase.from("pedido_item_diseno").upsert({ pedido_item_id: pedidoItemId, vista, notes: d.notes.trim() }, { onConflict: "pedido_item_id,vista" });
+        } else if (isExisting) {
+          await supabase.from("pedido_item_diseno").delete().eq("pedido_item_id", pedidoItemId).eq("vista", vista);
+        }
+      }
+    };
 
-    // Pagos que ya estaban guardados y fueron quitados (corrección/anulación): se revierten con
-    // un evento negativo EN LA MISMA CAJA donde se cobraron originalmente. Sin esto, el ledger de
-    // Caja conserva el monto viejo para siempre aunque la venta ya no lo muestre — dinero fantasma.
-    const removedEvents = oldPayments
-      .filter((p) => !newById.has(p.id))
-      .map((p) => {
-        const original = payments.find((ev) => ev.saleId === saleId && ev.orderPaymentId === p.id && ev.amountUSD > 0);
-        return makePaymentEvent({
-          saleId, itemId: null, orderPaymentId: p.id, vendorId: session.id, vendorName: session.name,
-          method: p.method, amountUSD: -p.amountUSD, rate: data.rate,
-          reference: p.reference ? `Anulación · ${p.reference}` : "Anulación",
-          cajaId: original ? original.cajaId : (myCaja ? myCaja.id : null),
-        });
+    let saleId = existingId;
+    if (!existingId) {
+      const { data: pedidoRow, error: pedidoErr } = await supabase
+        .from("pedidos")
+        .insert({ vendedor_id: session.id, cliente_id: clientId, total: data.total, rate_snap: data.rate, caja_id: myCaja ? myCaja.id : null })
+        .select()
+        .single();
+      if (pedidoErr) { console.error("saveSale: insert pedido:", pedidoErr); return; }
+      saleId = pedidoRow.id;
+    } else {
+      const removedItemIds = oldItems.filter((i) => !newItemIds.has(i.id)).map((i) => i.id);
+      if (removedItemIds.length) await supabase.from("pedido_items").delete().in("id", removedItemIds);
+    }
+
+    // Items: actualizar los que ya existían, crear los agregados durante la edición.
+    // Secuencial (no bulk) para poder mapear con certeza cada item local -> su id real en la base.
+    for (const it of data.items) {
+      const isExisting = oldItemIds.has(it.id);
+      if (isExisting) {
+        await supabase.from("pedido_items").update(itemPayload(it)).eq("id", it.id);
+        await syncDesignNotes(it.id, it.designData, true);
+      } else {
+        const { data: dbItem, error: itemErr } = await supabase.from("pedido_items").insert({ pedido_id: saleId, ...itemPayload(it) }).select().single();
+        if (itemErr) { console.error("saveSale: insert item:", itemErr); continue; }
+        await syncDesignNotes(dbItem.id, it.designData, false);
+      }
+    }
+
+    // Pagos: mismo diff add/remove de siempre (v0.8), ahora escribiendo contra la tabla pagos real
+    // en vez de un array en memoria. Un pago quitado se revierte con un evento negativo en la MISMA
+    // caja donde se cobró originalmente — sin esto, Caja conservaría dinero fantasma.
+    const newPayments = data.orderPayments.filter((p) => !oldPaymentIds.has(p.id));
+    for (const p of newPayments) {
+      await supabase.from("pagos").insert({
+        pedido_id: saleId, order_payment_id: p.id, method: p.method, amount: p.paid, currency: p.currency,
+        amount_usd: p.amountUSD, rate_snap: data.rate, reference_number: p.reference || null,
+        caja_id: myCaja ? myCaja.id : null, created_by: session.id,
       });
-
-    const ledgerEvents = [...addedEvents, ...removedEvents];
-    if (ledgerEvents.length > 0) setPayments((prev) => [...prev, ...ledgerEvents]);
+    }
+    const removedPayments = oldPayments.filter((p) => !newPaymentIds.has(p.id));
+    for (const p of removedPayments) {
+      const { data: original } = await supabase.from("pagos").select("caja_id").eq("pedido_id", saleId).eq("order_payment_id", p.id).eq("is_reversal", false).maybeSingle();
+      await supabase.from("pagos").insert({
+        pedido_id: saleId, order_payment_id: p.id, is_reversal: true, method: p.method, amount: -p.paid, currency: p.currency,
+        amount_usd: -p.amountUSD, rate_snap: data.rate,
+        reference_number: p.reference ? `Anulación · ${p.reference}` : "Anulación",
+        caja_id: original ? original.caja_id : (myCaja ? myCaja.id : null), created_by: session.id,
+      });
+    }
 
     let payDetail = "";
-    if (addedEvents.length > 0) payDetail += ` · +${addedEvents.length} pago(s) (${usd(addedEvents.reduce((s, e) => s + e.amountUSD, 0))})`;
-    if (removedEvents.length > 0) payDetail += ` · ${removedEvents.length} pago(s) anulado(s) (${usd(Math.abs(removedEvents.reduce((s, e) => s + e.amountUSD, 0)))})`;
+    if (newPayments.length > 0) payDetail += ` · +${newPayments.length} pago(s) (${usd(newPayments.reduce((s, e) => s + e.amountUSD, 0))})`;
+    if (removedPayments.length > 0) payDetail += ` · ${removedPayments.length} pago(s) anulado(s) (${usd(removedPayments.reduce((s, e) => s + e.amountUSD, 0))})`;
 
     if (existingId) {
-      setSales((prev) => prev.map((s) => s.id === existingId
-        ? { ...s, data, clientId, audit: [...s.audit, { ts: new Date().toISOString(), user: session.name, action: "Editó el pedido", detail: `Total ${usd(data.total)} · ${data.items.length} prod.${payDetail}` }] }
-        : s));
+      await supabase.from("pedidos").update({ cliente_id: clientId, total: data.total, rate_snap: data.rate, updated_at: new Date().toISOString() }).eq("id", saleId);
+      await supabase.from("audit_log").insert({ entity: "pedido", entity_id: saleId, action: "Editó el pedido", detail: `Total ${usd(data.total)} · ${data.items.length} prod.${payDetail}`, user_id: session.id, user_name: session.name });
     } else {
-      const folio = "ZS-" + String(folioRef.current++).padStart(4, "0");
-      setSales((prev) => [{ id: saleId, folio, createdAt: new Date().toISOString(), vendorId: session.id, vendorName: session.name, clientId, cajaId: myCaja ? myCaja.id : null, data, audit: [{ ts: new Date().toISOString(), user: session.name, action: "Creó el pedido", detail: `Total ${usd(data.total)}${payDetail}` }] }, ...prev]);
+      await supabase.from("audit_log").insert({ entity: "pedido", entity_id: saleId, action: "Creó el pedido", detail: `Total ${usd(data.total)}${payDetail}`, user_id: session.id, user_name: session.name });
     }
+
+    await Promise.all([loadSales(), loadPayments()]);
     setEditSale(null); setRoute("seguimiento");
   };
 
@@ -1865,25 +1984,40 @@ export default function App() {
     if (!error) setCajas((prev) => prev.map((x) => (x.id === cajaId ? mapCaja(data) : x)));
   };
 
-  const setItemState = (saleId, itemId, estado) => setSales((prev) => prev.map((s) => {
-    if (s.id !== saleId) return s;
-    const items = s.data.items.map((i) => (i.id === itemId ? { ...i, estado } : i));
+  const setItemState = async (saleId, itemId, estado) => {
+    const sale = sales.find((s) => s.id === saleId);
+    const it = sale && sale.data.items.find((i) => i.id === itemId);
+    const { error } = await supabase.from("pedido_items").update({ estado }).eq("id", itemId);
+    if (error) { console.error("setItemState:", error); return; }
     const lbl = ITEM_STATES.find((x) => x.id === estado).label;
-    const it = s.data.items.find((i) => i.id === itemId);
-    return { ...s, data: { ...s.data, items }, audit: [...s.audit, { ts: new Date().toISOString(), user: session.name, action: "Cambió estado de producto", detail: `${it ? it.name : ""} → ${lbl}` }] };
-  }));
+    const detail = `${it ? it.name : ""} → ${lbl}`;
+    await supabase.from("audit_log").insert({ entity: "pedido", entity_id: saleId, action: "Cambió estado de producto", detail, user_id: session.id, user_name: session.name });
+    setSales((prev) => prev.map((s) => {
+      if (s.id !== saleId) return s;
+      const items = s.data.items.map((i) => (i.id === itemId ? { ...i, estado } : i));
+      return { ...s, data: { ...s.data, items }, audit: [...s.audit, { ts: new Date().toISOString(), user: session.name, action: "Cambió estado de producto", detail }] };
+    }));
+  };
 
-  const toggleProceso = (saleId, itemId, categoria, procesoId) => setSales((prev) => prev.map((s) => {
-    if (s.id !== saleId) return s;
-    const it = s.data.items.find((i) => i.id === itemId);
-    if (!it) return s;
+  const toggleProceso = async (saleId, itemId, categoria, procesoId) => {
+    const sale = sales.find((s) => s.id === saleId);
+    const it = sale && sale.data.items.find((i) => i.id === itemId);
+    if (!it) return;
     const doneKey = categoria === "taller" ? "procesos_taller_done" : "procesos_diseno_done";
     const list = categoria === "taller" ? PROCESOS_TALLER : PROCESOS_DISENO;
     const isDone = it[doneKey].includes(procesoId);
-    const items = s.data.items.map((i) => (i.id === itemId ? { ...i, [doneKey]: isDone ? i[doneKey].filter((x) => x !== procesoId) : [...i[doneKey], procesoId] } : i));
+    const newDone = isDone ? it[doneKey].filter((x) => x !== procesoId) : [...it[doneKey], procesoId];
+    const { error } = await supabase.from("pedido_items").update({ [doneKey]: newDone }).eq("id", itemId);
+    if (error) { console.error("toggleProceso:", error); return; }
     const lbl = list.find((x) => x.id === procesoId).label;
-    return { ...s, data: { ...s.data, items }, audit: [...s.audit, { ts: new Date().toISOString(), user: session.name, action: `Proceso de ${categoria}`, detail: `${it.name} · ${lbl} → ${isDone ? "pendiente" : "completado"}` }] };
-  }));
+    const detail = `${it.name} · ${lbl} → ${isDone ? "pendiente" : "completado"}`;
+    await supabase.from("audit_log").insert({ entity: "pedido", entity_id: saleId, action: `Proceso de ${categoria}`, detail, user_id: session.id, user_name: session.name });
+    setSales((prev) => prev.map((s) => {
+      if (s.id !== saleId) return s;
+      const items = s.data.items.map((i) => (i.id === itemId ? { ...i, [doneKey]: newDone } : i));
+      return { ...s, data: { ...s.data, items }, audit: [...s.audit, { ts: new Date().toISOString(), user: session.name, action: `Proceso de ${categoria}`, detail }] };
+    }));
+  };
 
   // Alta real de vendedores ("manager de apertura"): la Edge Function create-vendor
   // hace, del lado del servidor, lo que el navegador nunca podría hacer con la anon

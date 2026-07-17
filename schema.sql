@@ -19,6 +19,10 @@
 --     Auth es sintético (cedula@zappostore.local); nunca lo ve el usuario.
 --   • El master deja de ser un valor hardcodeado en el front — es una fila más
 --     en vendedores con role='master'.
+-- Cambios v0.6 (migración del núcleo pedidos/pedido_items/pagos a Supabase real):
+--   • pedidos.folio ya no lo genera el cliente (era un contador en memoria del
+--     navegador, garantizaba colisiones con más de un vendedor) — ahora lo pone
+--     un trigger (set_pedido_folio) con una secuencia real de Postgres.
 -- ============================================================================
 create extension if not exists "pgcrypto";
 
@@ -100,9 +104,15 @@ create table if not exists products (
 );
 
 -- ---------- PEDIDOS (una venta) ----------
+-- folio: NO lo pone el cliente. Se autogenera con una secuencia real de Postgres
+-- (ver trigger set_pedido_folio más abajo) para que sea único aunque dos
+-- vendedores guarden una venta al mismo tiempo — un contador en el navegador
+-- (como se usaba en memoria) generaría folios duplicados con más de un vendedor.
+create sequence if not exists pedidos_folio_seq start 1;
+
 create table if not exists pedidos (
   id           uuid primary key default gen_random_uuid(),
-  folio        text unique not null,               -- ZS-0001
+  folio        text unique not null default '',    -- lo completa el trigger antes de insertar (ZS-0001)
   vendedor_id  uuid references vendedores(id),
   cliente_id   uuid references clientes(id),
   total        numeric(14,2) not null default 0,
@@ -117,6 +127,18 @@ create table if not exists pedidos (
   updated_at   timestamptz not null default now()
 );
 create index if not exists idx_pedidos_vendedor on pedidos (vendedor_id, created_at desc);
+
+create or replace function set_pedido_folio() returns trigger
+language plpgsql as $$
+begin
+  if new.folio is null or new.folio = '' then
+    new.folio := 'ZS-' || lpad(nextval('pedidos_folio_seq')::text, 4, '0');
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists trg_set_pedido_folio on pedidos;
+create trigger trg_set_pedido_folio before insert on pedidos for each row execute function set_pedido_folio();
 create index if not exists idx_pedidos_cliente on pedidos (cliente_id, created_at desc);
 
 -- ---------- ITEMS DEL PEDIDO ----------
