@@ -467,7 +467,8 @@ function ItemEditForm({ draft, onPatch, onSave, onCancel, isNew }) {
   };
   const onDesignPhotos = async (files) => {
     if (!files || !files.length) return;
-    const imgs = await Promise.all(Array.from(files).map((f) => optimizeImage(f)));
+    const dataUrls = await Promise.all(Array.from(files).map((f) => optimizeImage(f)));
+    const imgs = dataUrls.map((url) => ({ path: null, url })); // path null = todavía no subida a Storage (se sube al guardar)
     onPatch({ designData: { ...draft.designData, [designTab]: { ...draft.designData[designTab], photos: [...draft.designData[designTab].photos, ...imgs] } } });
   };
   const removeDesignPhoto = (idx) => {
@@ -595,7 +596,7 @@ function ItemEditForm({ draft, onPatch, onSave, onCancel, isNew }) {
                 <div className="flex flex-wrap gap-2">
                   {draft.designData[designTab].photos.map((photo, i) => (
                     <div key={i} className="relative">
-                      <img src={photo} alt="diseño" className="w-14 h-14 rounded-lg object-cover border border-slate-200" />
+                      <img src={photo.url} alt="diseño" className="w-14 h-14 rounded-lg object-cover border border-slate-200" />
                       <button data-testid={`remove-design-photo-${designTab}-${i}`} onClick={() => removeDesignPhoto(i)}
                         className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-rose-500 text-white flex items-center justify-center"><X className="w-3 h-3" /></button>
                     </div>
@@ -1028,7 +1029,7 @@ function ComandaModal({ session, data, onClose, onFinalize, readOnly, saleMeta, 
                               {d.notes && <p className="text-xs text-slate-400 italic">{DESIGN_VIEWS[tabId].label}: {d.notes}</p>}
                               {d.photos.length > 0 && (
                                 <div className="flex gap-1 mt-1 flex-wrap">
-                                  {d.photos.map((p, i) => <img key={i} src={p} alt="" className="w-10 h-10 rounded object-cover border border-slate-200" />)}
+                                  {d.photos.map((p, i) => <img key={i} src={p.url} alt="" className="w-10 h-10 rounded object-cover border border-slate-200" />)}
                                 </div>
                               )}
                             </div>
@@ -1742,9 +1743,12 @@ export default function App() {
   };
   useEffect(() => { if (session) loadCajas(); }, [session]);
 
-  const mapPedidoItem = (it) => {
+  const mapPedidoItem = (it, photoUrlByPath) => {
     const designData = { frente: { photos: [], notes: "" }, espalda: { photos: [], notes: "" }, mangas: { photos: [], notes: "" } };
     (it.pedido_item_diseno || []).forEach((d) => { if (designData[d.vista]) designData[d.vista].notes = d.notes || ""; });
+    (it.pedido_item_fotos || []).forEach((f) => {
+      if (designData[f.vista]) designData[f.vista].photos.push({ path: f.storage_path, url: (photoUrlByPath && photoUrlByPath[f.storage_path]) || "" });
+    });
     const catalog = QUICK_PRODUCTS.find((p) => p.id === it.product_id);
     return {
       id: it.id, productId: it.product_id, name: it.name, emoji: catalog ? catalog.emoji : "📦",
@@ -1769,8 +1773,8 @@ export default function App() {
       })
       .filter((p) => p.amountUSD > 0.009);
   };
-  const mapSale = (row, audit) => {
-    const items = (row.pedido_items || []).map(mapPedidoItem);
+  const mapSale = (row, audit, photoUrlByPath) => {
+    const items = (row.pedido_items || []).map((it) => mapPedidoItem(it, photoUrlByPath));
     const orderPayments = reconstructOrderPayments(row.pagos);
     const total = Number(row.total);
     const paidUSD = orderPayments.reduce((s, p) => s + p.amountUSD, 0);
@@ -1789,16 +1793,26 @@ export default function App() {
   const loadSales = async () => {
     const { data, error } = await supabase
       .from("pedidos")
-      .select("*, clientes(name, phone, cedula, direccion), vendedores(name), pedido_items(*, pedido_item_diseno(*)), pagos(*)")
+      .select("*, clientes(name, phone, cedula, direccion), vendedores(name), pedido_items(*, pedido_item_diseno(*), pedido_item_fotos(*)), pagos(*)")
       .order("created_at", { ascending: false });
     if (error) { console.error("loadSales:", error); return; }
+
+    // URLs firmadas en un solo llamado batch (el bucket es privado) para todas las fotos que aparezcan.
+    const allPaths = [];
+    data.forEach((row) => (row.pedido_items || []).forEach((it) => (it.pedido_item_fotos || []).forEach((f) => allPaths.push(f.storage_path))));
+    let photoUrlByPath = {};
+    if (allPaths.length) {
+      const { data: signed } = await supabase.storage.from("diseno-fotos").createSignedUrls(allPaths, 3600);
+      (signed || []).forEach((s) => { if (s.signedUrl) photoUrlByPath[s.path] = s.signedUrl; });
+    }
+
     const pedidoIds = data.map((r) => r.id);
     const { data: auditRows } = pedidoIds.length
       ? await supabase.from("audit_log").select("*").eq("entity", "pedido").in("entity_id", pedidoIds).order("created_at", { ascending: true })
       : { data: [] };
     const auditByPedido = {};
     (auditRows || []).forEach((a) => { (auditByPedido[a.entity_id] ||= []).push({ ts: a.created_at, user: a.user_name, action: a.action, detail: a.detail }); });
-    setSales(data.map((row) => mapSale(row, auditByPedido[row.id] || [])));
+    setSales(data.map((row) => mapSale(row, auditByPedido[row.id] || [], photoUrlByPath)));
   };
   useEffect(() => { if (session) loadSales(); }, [session]);
 
@@ -1881,12 +1895,33 @@ export default function App() {
       procesos_diseno: it.procesos_diseno, procesos_diseno_done: it.procesos_diseno_done,
       zones: it.zones, estado: it.estado,
     });
-    const syncDesignNotes = async (pedidoItemId, designData, isExisting) => {
+    // Sincroniza notas Y fotos de una zona. Las fotos nuevas (path === null, agregadas esta sesión
+    // como data URI vía optimizeImage) se suben a Storage recién acá; las que ya no están en la
+    // lista pero sí en oldDesignData se borran de Storage + la fila en pedido_item_fotos.
+    const syncDesignData = async (pedidoItemId, designData, oldDesignData) => {
       for (const [vista, d] of Object.entries(designData)) {
         if (d.notes && d.notes.trim()) {
           await supabase.from("pedido_item_diseno").upsert({ pedido_item_id: pedidoItemId, vista, notes: d.notes.trim() }, { onConflict: "pedido_item_id,vista" });
-        } else if (isExisting) {
+        } else if (oldDesignData) {
           await supabase.from("pedido_item_diseno").delete().eq("pedido_item_id", pedidoItemId).eq("vista", vista);
+        }
+
+        const oldPhotos = oldDesignData ? oldDesignData[vista].photos : [];
+        const newPhotos = d.photos;
+        const removedPaths = oldPhotos.filter((p) => p.path && !newPhotos.some((np) => np.path === p.path)).map((p) => p.path);
+        if (removedPaths.length) {
+          await supabase.storage.from("diseno-fotos").remove(removedPaths);
+          await supabase.from("pedido_item_fotos").delete().in("storage_path", removedPaths);
+        }
+        for (const photo of newPhotos) {
+          if (photo.path) continue; // ya estaba subida de un guardado anterior
+          try {
+            const blob = await (await fetch(photo.url)).blob();
+            const path = `${pedidoItemId}/${vista}/${newUuid()}.jpg`;
+            const { error: upErr } = await supabase.storage.from("diseno-fotos").upload(path, blob, { contentType: "image/jpeg" });
+            if (upErr) { console.error("saveSale: upload foto:", upErr); continue; }
+            await supabase.from("pedido_item_fotos").insert({ pedido_item_id: pedidoItemId, vista, storage_path: path });
+          } catch (e) { console.error("saveSale: upload foto:", e); }
         }
       }
     };
@@ -1902,20 +1937,26 @@ export default function App() {
       saleId = pedidoRow.id;
     } else {
       const removedItemIds = oldItems.filter((i) => !newItemIds.has(i.id)).map((i) => i.id);
-      if (removedItemIds.length) await supabase.from("pedido_items").delete().in("id", removedItemIds);
+      if (removedItemIds.length) {
+        // limpiar Storage de los items que se van, si no quedan archivos huérfanos para siempre
+        const { data: orphanFotos } = await supabase.from("pedido_item_fotos").select("storage_path").in("pedido_item_id", removedItemIds);
+        const orphanPaths = (orphanFotos || []).map((f) => f.storage_path);
+        if (orphanPaths.length) await supabase.storage.from("diseno-fotos").remove(orphanPaths);
+        await supabase.from("pedido_items").delete().in("id", removedItemIds);
+      }
     }
 
     // Items: actualizar los que ya existían, crear los agregados durante la edición.
     // Secuencial (no bulk) para poder mapear con certeza cada item local -> su id real en la base.
     for (const it of data.items) {
-      const isExisting = oldItemIds.has(it.id);
-      if (isExisting) {
+      const oldItem = oldItems.find((x) => x.id === it.id);
+      if (oldItem) {
         await supabase.from("pedido_items").update(itemPayload(it)).eq("id", it.id);
-        await syncDesignNotes(it.id, it.designData, true);
+        await syncDesignData(it.id, it.designData, oldItem.designData);
       } else {
         const { data: dbItem, error: itemErr } = await supabase.from("pedido_items").insert({ pedido_id: saleId, ...itemPayload(it) }).select().single();
         if (itemErr) { console.error("saveSale: insert item:", itemErr); continue; }
-        await syncDesignNotes(dbItem.id, it.designData, false);
+        await syncDesignData(dbItem.id, it.designData, null);
       }
     }
 

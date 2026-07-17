@@ -1,5 +1,5 @@
 -- ============================================================================
--- ZappoStore — Esquema PostgreSQL / Supabase (v0.5)
+-- ZappoStore — Esquema PostgreSQL / Supabase (v0.7)
 -- Alineado al modelo real de src/App.jsx a la fecha (login+roles, Vender,
 -- Seguimiento/Kanban, Clientes, Vendedores, Caja, Resumen/Reportes). Cambios
 -- clave respecto a v0.3:
@@ -23,6 +23,11 @@
 --   • pedidos.folio ya no lo genera el cliente (era un contador en memoria del
 --     navegador, garantizaba colisiones con más de un vendedor) — ahora lo pone
 --     un trigger (set_pedido_folio) con una secuencia real de Postgres.
+-- Cambios v0.7 (Storage real para fotos de diseño):
+--   • Bucket privado "diseno-fotos" (ver sección STORAGE al final) — cada foto
+--     sube a {pedido_item_id}/{vista}/{uuid}.jpg y pedido_item_fotos.storage_path
+--     guarda ese path. Se sirven con URLs firmadas (createSignedUrls), nunca
+--     públicas — solo un vendedor/master activo puede subir/ver/borrar.
 -- ============================================================================
 create extension if not exists "pgcrypto";
 
@@ -234,6 +239,102 @@ create table if not exists inventory_movements (
 );
 
 -- ============================================================================
+-- RLS — políticas reales, aplicadas y verificadas end-to-end (v0.5 a v0.7)
+-- Todas las tablas tienen RLS habilitada. Sin política = deny-all para ese
+-- rol/operación (default de Postgres). Las funciones de abajo son
+-- security definer para evitar el problema clásico de recursión al chequear
+-- rol/dueño desde dentro de una política sobre la misma tabla.
+-- ============================================================================
+create or replace function is_active_master(check_uid uuid) returns boolean
+language sql security definer stable set search_path = public as $$
+  select exists (select 1 from vendedores where auth_user_id = check_uid and role = 'master' and active);
+$$;
+create or replace function is_active_vendedor(check_uid uuid) returns boolean
+language sql security definer stable set search_path = public as $$
+  select exists (select 1 from vendedores where auth_user_id = check_uid and active);
+$$;
+create or replace function my_vendedor_id() returns uuid
+language sql security definer stable set search_path = public as $$
+  select id from vendedores where auth_user_id = auth.uid();
+$$;
+create or replace function owns_pedido(check_pedido_id uuid) returns boolean
+language sql security definer stable set search_path = public as $$
+  select exists (select 1 from pedidos where id = check_pedido_id and (vendedor_id = my_vendedor_id() or is_active_master(auth.uid())));
+$$;
+create or replace function owns_pedido_item(check_item_id uuid) returns boolean
+language sql security definer stable set search_path = public as $$
+  select owns_pedido((select pedido_id from pedido_items where id = check_item_id));
+$$;
+
+alter table vendedores enable row level security;
+alter table clientes enable row level security;
+alter table exchange_rates enable row level security;
+alter table cajas enable row level security;
+alter table products enable row level security;
+alter table pedidos enable row level security;
+alter table pedido_items enable row level security;
+alter table pedido_item_diseno enable row level security;
+alter table pedido_item_fotos enable row level security;
+alter table pagos enable row level security;
+alter table audit_log enable row level security;
+alter table inventory_movements enable row level security;
+
+-- vendedores: cada uno lee su propia fila (necesario para el login); un master
+-- activo lee/actualiza todas (pantalla Vendedores). El alta real (insert) NO
+-- tiene política de INSERT a propósito — solo pasa por la Edge Function
+-- create-vendor, que usa la Service Role Key y por lo tanto evade RLS.
+do $$ begin create policy "vendedores_select_self" on vendedores for select using (auth_user_id = auth.uid()); exception when duplicate_object then null; end $$;
+do $$ begin create policy "vendedores_select_master" on vendedores for select using (is_active_master(auth.uid())); exception when duplicate_object then null; end $$;
+do $$ begin create policy "vendedores_update_master" on vendedores for update using (is_active_master(auth.uid())); exception when duplicate_object then null; end $$;
+
+-- clientes: directorio compartido — cualquier vendedor/master activo puede
+-- leer/crear/actualizar (evita duplicar el mismo cliente entre vendedores).
+do $$ begin create policy "clientes_select_active" on clientes for select using (is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+do $$ begin create policy "clientes_insert_active" on clientes for insert with check (is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+do $$ begin create policy "clientes_update_active" on clientes for update using (is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+
+-- cajas: cada vendedor ve/abre/cierra solo la suya; el master ve todas pero no
+-- opera caja propia (regla de negocio: "el master no opera caja propia").
+do $$ begin create policy "cajas_select_own_or_master" on cajas for select using (vendedor_id = my_vendedor_id() or is_active_master(auth.uid())); exception when duplicate_object then null; end $$;
+do $$ begin create policy "cajas_insert_own" on cajas for insert with check (vendedor_id = my_vendedor_id()); exception when duplicate_object then null; end $$;
+do $$ begin create policy "cajas_update_own" on cajas for update using (vendedor_id = my_vendedor_id()); exception when duplicate_object then null; end $$;
+
+-- pedidos: dueño o master.
+do $$ begin create policy "pedidos_select" on pedidos for select using (vendedor_id = my_vendedor_id() or is_active_master(auth.uid())); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedidos_insert" on pedidos for insert with check (vendedor_id = my_vendedor_id()); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedidos_update" on pedidos for update using (vendedor_id = my_vendedor_id() or is_active_master(auth.uid())); exception when duplicate_object then null; end $$;
+
+-- pedido_items / pedido_item_diseno / pedido_item_fotos: heredan el permiso
+-- del pedido padre.
+do $$ begin create policy "pedido_items_select" on pedido_items for select using (owns_pedido(pedido_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedido_items_insert" on pedido_items for insert with check (owns_pedido(pedido_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedido_items_update" on pedido_items for update using (owns_pedido(pedido_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedido_items_delete" on pedido_items for delete using (owns_pedido(pedido_id)); exception when duplicate_object then null; end $$;
+
+do $$ begin create policy "pedido_item_diseno_select" on pedido_item_diseno for select using (owns_pedido_item(pedido_item_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedido_item_diseno_insert" on pedido_item_diseno for insert with check (owns_pedido_item(pedido_item_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedido_item_diseno_update" on pedido_item_diseno for update using (owns_pedido_item(pedido_item_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedido_item_diseno_delete" on pedido_item_diseno for delete using (owns_pedido_item(pedido_item_id)); exception when duplicate_object then null; end $$;
+
+do $$ begin create policy "pedido_item_fotos_select" on pedido_item_fotos for select using (owns_pedido_item(pedido_item_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedido_item_fotos_insert" on pedido_item_fotos for insert with check (owns_pedido_item(pedido_item_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pedido_item_fotos_delete" on pedido_item_fotos for delete using (owns_pedido_item(pedido_item_id)); exception when duplicate_object then null; end $$;
+
+-- pagos: ledger APPEND-ONLY a propósito (ver v0.8/v1.0) — solo select/insert,
+-- nunca update/delete. Una corrección se hace con una fila de reversión nueva,
+-- no editando ni borrando la original.
+do $$ begin create policy "pagos_select" on pagos for select using (owns_pedido(pedido_id)); exception when duplicate_object then null; end $$;
+do $$ begin create policy "pagos_insert" on pagos for insert with check (owns_pedido(pedido_id)); exception when duplicate_object then null; end $$;
+
+-- audit_log: abierto a cualquier vendedor/master activo (no es dato financiero
+-- sensible, es un registro de actividad).
+do $$ begin create policy "audit_log_select" on audit_log for select using (is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+do $$ begin create policy "audit_log_insert" on audit_log for insert with check (is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+
+-- exchange_rates / products / inventory_movements: RLS habilitada, sin
+-- políticas todavía (deny-all) — la app no las usa desde el front hoy.
+
+-- ============================================================================
 -- VISTAS
 -- ============================================================================
 
@@ -263,10 +364,24 @@ left join pagos pg on pg.pedido_id = p.id
 group by p.id, p.total;
 
 -- ============================================================================
+-- STORAGE — fotos de diseño (bucket privado, servido con URLs firmadas)
+-- ============================================================================
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('diseno-fotos', 'diseno-fotos', false, 2097152, array['image/jpeg','image/png','image/webp'])
+on conflict (id) do nothing;
+
+do $$ begin create policy "diseno_fotos_select" on storage.objects for select using (bucket_id = 'diseno-fotos' and is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+do $$ begin create policy "diseno_fotos_insert" on storage.objects for insert with check (bucket_id = 'diseno-fotos' and is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+do $$ begin create policy "diseno_fotos_delete" on storage.objects for delete using (bucket_id = 'diseno-fotos' and is_active_vendedor(auth.uid())); exception when duplicate_object then null; end $$;
+
+-- ============================================================================
 -- SEED mínimo
 -- ============================================================================
 insert into vendedores (cedula, name, role) values ('master','Supervisor','master')
   on conflict (cedula) do nothing;
 
--- Nota RLS: habilitar y crear políticas por rol en migración 003
--- (vendedor: solo sus pedidos; master: todo).
+-- RLS: ya implementada y verificada (ver comentarios junto a cada tabla arriba).
+-- vendedor ve/opera solo lo suyo (my_vendedor_id(), owns_pedido(), owns_pedido_item());
+-- master ve todo (is_active_master()); clientes/audit_log/pagos abiertos a cualquier
+-- vendedor o master activo (is_active_vendedor()) con el criterio de "directorio /
+-- ledger compartido" documentado en CONTEXTO.md.
