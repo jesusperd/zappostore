@@ -13,9 +13,9 @@ Repo: `github.com/jesusperd/zappostore`.
 - **Frontend**: React 18 (Vite) + Tailwind CSS. Todo vive hoy en `src/App.jsx` (un solo archivo grande, todavía sin separar en `screens/`/`components/` — refactor sugerido pero no hecho).
 - **Backend**: Supabase (Postgres + Auth + Storage + Edge Functions). **100% real, nada en memoria ni localStorage** — ver estado abajo.
 - **Icons**: `lucide-react`. Sin librería de gráficos (los mini-gráficos son un `BarChart` SVG propio).
-- Archivos clave: `src/lib/supabase.js` (cliente Singleton vía `globalThis`), `schema.sql` (fuente de verdad completa del backend, v0.9), `supabase/functions/create-vendor/` y `supabase/functions/update-vendor/` (Edge Functions de alta/edición de vendedores).
+- Archivos clave: `src/lib/supabase.js` (cliente Singleton vía `globalThis`), `schema.sql` (fuente de verdad completa del backend, v0.10), `supabase/functions/create-vendor/` y `supabase/functions/update-vendor/` (Edge Functions de alta/edición de vendedores).
 
-## Estado actual (v2.4, al 2026-07-21)
+## Estado actual (v2.5, al 2026-07-21)
 
 **La migración completa de memoria/localStorage → Supabase real terminó.** Todo el flujo operativo diario (login, vendedores, clientes, cajas, pedidos, pedido_items, pagos, fotos de diseño, tasa de cambio) corre contra Postgres real con RLS verificada tabla por tabla. Nada se pierde al refrescar la página, nada queda "por navegador".
 
@@ -37,9 +37,9 @@ Módulos y su estado:
 
 **Bloqueado en:** decisión de negocio del cliente (no de código) — confirmar si paga Supabase Pro ($25/mes, backups + sin auto-pausa) antes de encarar el deploy a producción (Vercel/Netlify + dominio).
 
-## Modelo de datos (resumen — `schema.sql` v0.9 es la fuente de verdad completa)
+## Modelo de datos (resumen — `schema.sql` v0.10 es la fuente de verdad completa)
 
-Tablas núcleo: `vendedores` (+`auth_user_id→auth.users`), `clientes` (+`cedula`/`direccion`), `exchange_rates`, `cajas`, `pedidos` (folio autogenerado por trigger/secuencia, + `has_delivery`/`delivery_fee`/`comision_porcentaje`/`comision_monto`), `pedido_items` (talla+cantidad+color, `operacion_tipo`, `procesos_taller`/`procesos_diseno` + sus `_done`), `pedido_item_diseno` (notas por zona Frente/Espalda/Mangas), `pedido_item_fotos` (fotos, `storage_path`), `pagos` (ledger **append-only** con `order_payment_id`+`is_reversal` — solo insert/select, nunca update/delete), `audit_log`, `inventory_movements` (gancho sin usar).
+Tablas núcleo: `vendedores` (+`auth_user_id→auth.users`), `clientes` (+`cedula`/`direccion`), `exchange_rates`, `cajas`, `pedidos` (folio autogenerado por trigger/secuencia, + `has_delivery`/`delivery_fee`/`delivery_incluido_en_total`/`comision_porcentaje`/`comision_monto`), `pedido_items` (talla+cantidad+color, `operacion_tipo`, `procesos_taller`/`procesos_diseno` + sus `_done`), `pedido_item_diseno` (notas por zona Frente/Espalda/Mangas), `pedido_item_fotos` (fotos, `storage_path`), `pagos` (ledger **append-only** con `order_payment_id`+`is_reversal` — solo insert/select, nunca update/delete), `audit_log`, `inventory_movements` (gancho sin usar).
 
 Vistas: `v_historial_cliente`, `v_historial_vendedor`, `v_pedido_saldo`.
 
@@ -59,7 +59,7 @@ RLS: `vendedores`/`clientes`/`audit_log`/`exchange_rates` por rol activo; `cajas
 - **Layout**: sidebar fijo (`<aside>`, no drawer/hamburguesa) — target es tablet/desktop de taller, no mobile.
 - **Venta sin caja abierta**: bloqueada solo para el rol vendedor (el master no opera caja propia, queda exento). Se puede seguir editando una venta ya existente sin turno abierto.
 - **Comisión por pedido**: se calcula solo sobre el total de productos, sin el delivery. Es un dato interno del vendedor — nunca aparece en la comanda que ve el cliente.
-- **Delivery**: se suma al total que paga el cliente y sí aparece en la comanda.
+- **Delivery**: por defecto se suma al total que paga el cliente y aparece en la comanda; hay un checkbox "Incluir en el total de la factura" (tildado por defecto) que, si se destilda, deja el monto registrado para estadísticas pero fuera del total facturado — la comanda lo aclara con "(se cobra aparte)".
 - **Eliminar vendedores**: no existe borrado físico, solo el toggle lógico (`active`) — `vendedores` tiene FKs entrantes desde `pedidos`/`cajas`/`pagos` sin cascade.
 - **Borrado de datos de prueba**: `pedidos`/`cajas` no tienen política RLS de DELETE (a propósito, por trazabilidad) — cualquier limpieza de datos de prueba se hace desde el SQL Editor de Supabase, nunca desde la app.
 

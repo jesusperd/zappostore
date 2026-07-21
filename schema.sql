@@ -38,6 +38,11 @@
 --   • pedidos.comision_porcentaje/comision_monto: comisión interna del
 --     vendedor sobre ESA venta, calculada solo sobre el total de productos
 --     (sin el delivery) — nunca aparece en la comanda del cliente.
+-- Cambios v0.10 (delivery: incluir o no en el total facturado):
+--   • pedidos.delivery_incluido_en_total: si hubo delivery pero se cobra
+--     aparte (ej. el cliente le paga el flete directo al repartidor), el
+--     monto queda registrado para las estadísticas pero NO se suma al total
+--     que factura la tienda. Default true (comportamiento de v0.9).
 -- ============================================================================
 create extension if not exists "pgcrypto";
 
@@ -140,9 +145,12 @@ create table if not exists pedidos (
   client_ref   uuid unique,                          -- idempotencia offline
   created_at   timestamptz not null default now(),
   updated_at   timestamptz not null default now(),
-  -- Delivery: opcional, lo paga el cliente — delivery_fee ya está incluido en "total".
-  has_delivery        boolean not null default false,
-  delivery_fee        numeric(14,2) not null default 0,
+  -- Delivery: opcional. delivery_fee ya está incluido en "total" SOLO si
+  -- delivery_incluido_en_total es true (si se cobra aparte del repartidor,
+  -- queda registrado para estadísticas pero no suma al total facturado).
+  has_delivery              boolean not null default false,
+  delivery_fee              numeric(14,2) not null default 0,
+  delivery_incluido_en_total boolean not null default true,
   -- Comisión del vendedor sobre esta venta (interno, nunca en la comanda del
   -- cliente). Calculada solo sobre el total de productos, sin el delivery.
   comision_porcentaje numeric(5,2) not null default 0,

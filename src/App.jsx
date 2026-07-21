@@ -831,6 +831,7 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
   const [orderPayments, setOrderPayments] = useState(initialSale ? (initialSale.data.orderPayments || []) : []);
   const [hasDelivery, setHasDelivery] = useState(initialSale ? !!initialSale.data.hasDelivery : false);
   const [deliveryFee, setDeliveryFee] = useState(initialSale ? (initialSale.data.deliveryFee || 0) : 0);
+  const [deliveryInTotal, setDeliveryInTotal] = useState(initialSale ? initialSale.data.deliveryIncludedInTotal !== false : true);
   const [comisionPorcentaje, setComisionPorcentaje] = useState(initialSale ? (initialSale.data.comisionPorcentaje || 0) : 0);
   const [draft, setDraft] = useState(null);
   const [isNew, setIsNew] = useState(true);
@@ -839,9 +840,10 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
   const [saving, setSaving] = useState(false);
 
   const total = useMemo(() => items.reduce((s, i) => s + lineTotal(i), 0), [items]);
-  // Delivery lo paga el cliente (se suma al total a cobrar); comisión es interno del
-  // vendedor y se calcula SOLO sobre el total de productos, sin el delivery.
-  const grandTotal = useMemo(() => total + (hasDelivery ? Number(deliveryFee) || 0 : 0), [total, hasDelivery, deliveryFee]);
+  // Delivery lo paga el cliente Y se suma al total SOLO si deliveryInTotal está tildado
+  // (si se cobra aparte, ej. directo al repartidor, no debe sumar al total facturado).
+  // Comisión es interno del vendedor y se calcula SOLO sobre el total de productos.
+  const grandTotal = useMemo(() => total + (hasDelivery && deliveryInTotal ? Number(deliveryFee) || 0 : 0), [total, hasDelivery, deliveryInTotal, deliveryFee]);
   const comisionMonto = useMemo(() => (total * (Number(comisionPorcentaje) || 0)) / 100, [total, comisionPorcentaje]);
   const paidUSD = useMemo(() => orderPayments.reduce((s, p) => s + p.amountUSD, 0), [orderPayments]);
   const balance = Math.max(0, grandTotal - paidUSD);
@@ -876,6 +878,7 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
   const buildData = () => ({
     items, client, orderPayments, total: grandTotal, rate, paidUSD, balance,
     hasDelivery, deliveryFee: hasDelivery ? Number(deliveryFee) || 0 : 0,
+    deliveryIncludedInTotal: hasDelivery ? deliveryInTotal : true,
     comisionPorcentaje: Number(comisionPorcentaje) || 0, comisionMonto,
   });
   const editing = draft !== null;
@@ -980,11 +983,21 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
                     </div>
                   </div>
                   {hasDelivery && (
-                    <div className="flex items-center border border-slate-200 rounded-lg px-3">
-                      <span className="text-xs text-slate-400">$</span>
-                      <input data-testid="input-delivery-fee" type="number" min="0" placeholder="0.00" value={deliveryFee}
-                        onChange={(e) => setDeliveryFee(e.target.value)} className="flex-1 py-2 px-2 text-sm outline-none" />
-                    </div>
+                    <>
+                      <div className="flex items-center border border-slate-200 rounded-lg px-3">
+                        <span className="text-xs text-slate-400">$</span>
+                        <input data-testid="input-delivery-fee" type="number" min="0" placeholder="0.00" value={deliveryFee}
+                          onChange={(e) => setDeliveryFee(e.target.value)} className="flex-1 py-2 px-2 text-sm outline-none" />
+                      </div>
+                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                        <input data-testid="checkbox-delivery-in-total" type="checkbox" checked={deliveryInTotal}
+                          onChange={(e) => setDeliveryInTotal(e.target.checked)} className="w-3.5 h-3.5 accent-emerald-500" />
+                        Incluir en el total de la factura
+                      </label>
+                      {!deliveryInTotal && (
+                        <p className="text-[11px] text-amber-600">El delivery se cobra aparte (ej. directo al repartidor) — no se suma al total que paga el cliente en esta factura, solo queda registrado para las estadísticas.</p>
+                      )}
+                    </>
                   )}
                 </div>
 
@@ -1061,7 +1074,7 @@ function ProcesoChecklist({ label, Icon, procesos, done, catalog }) {
 }
 
 function ComandaModal({ session, data, onClose, onFinalize, readOnly, saleMeta, saving }) {
-  const { items, client, orderPayments, total, rate, paidUSD, balance, hasDelivery, deliveryFee } = data;
+  const { items, client, orderPayments, total, rate, paidUSD, balance, hasDelivery, deliveryFee, deliveryIncludedInTotal } = data;
   const [tab, setTab] = useState("comanda");
   const grupos = [
     { id: "pedido", label: "Pedido", icon: Tag, items },
@@ -1174,7 +1187,7 @@ function ComandaModal({ session, data, onClose, onFinalize, readOnly, saleMeta, 
               <div className="border-t border-slate-100 pt-2 space-y-2">
                 {hasDelivery && (
                   <div className="flex justify-between text-xs text-slate-500 zs-ticket-fine" data-testid="comanda-delivery">
-                    <span className="flex items-center gap-1"><Truck className="w-3 h-3" /> Delivery</span>
+                    <span className="flex items-center gap-1"><Truck className="w-3 h-3" /> Delivery{deliveryIncludedInTotal === false ? " (se cobra aparte)" : ""}</span>
                     <span className="font-medium text-slate-700">{usd(deliveryFee)}</span>
                   </div>
                 )}
@@ -2020,6 +2033,7 @@ export default function App() {
         client: row.clientes ? { name: row.clientes.name || "", phone: row.clientes.phone || "", cedula: row.clientes.cedula || "", direccion: row.clientes.direccion || "" } : { name: "", phone: "", cedula: "", direccion: "" },
         orderPayments, total, rate: Number(row.rate_snap), paidUSD, balance,
         hasDelivery: !!row.has_delivery, deliveryFee: Number(row.delivery_fee) || 0,
+        deliveryIncludedInTotal: row.delivery_incluido_en_total !== false,
         comisionPorcentaje: Number(row.comision_porcentaje) || 0, comisionMonto: Number(row.comision_monto) || 0,
       },
       audit,
@@ -2185,6 +2199,7 @@ export default function App() {
         .insert({
           vendedor_id: session.id, cliente_id: clientId, total: data.total, rate_snap: data.rate, caja_id: myCaja ? myCaja.id : null,
           has_delivery: !!data.hasDelivery, delivery_fee: data.deliveryFee || 0,
+          delivery_incluido_en_total: data.deliveryIncludedInTotal !== false,
           comision_porcentaje: data.comisionPorcentaje || 0, comision_monto: data.comisionMonto || 0,
         })
         .select()
@@ -2246,6 +2261,7 @@ export default function App() {
       await supabase.from("pedidos").update({
         cliente_id: clientId, total: data.total, rate_snap: data.rate, updated_at: new Date().toISOString(),
         has_delivery: !!data.hasDelivery, delivery_fee: data.deliveryFee || 0,
+        delivery_incluido_en_total: data.deliveryIncludedInTotal !== false,
         comision_porcentaje: data.comisionPorcentaje || 0, comision_monto: data.comisionMonto || 0,
       }).eq("id", saleId);
       await supabase.from("audit_log").insert({ entity: "pedido", entity_id: saleId, action: "Editó el pedido", detail: `Total ${usd(data.total)} · ${data.items.length} prod.${payDetail}`, user_id: session.id, user_name: session.name });
