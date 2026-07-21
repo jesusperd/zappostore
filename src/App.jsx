@@ -6,6 +6,7 @@ import {
   Lock, Eye, EyeOff, ShoppingBag, Pencil, Clock,
   PackageCheck, CheckCircle2, ClipboardList, Home, Users, UserCog,
   Wallet, Boxes, FileText, BarChart3, History, ShieldCheck, TrendingUp,
+  Truck, Percent,
 } from "lucide-react";
 
 import { FROG_LOGO } from "./assets/logo.js";
@@ -104,6 +105,13 @@ const NAV_SOON = [
 // ===HELPERS_START===
 const usd = (n) => `$${(n || 0).toFixed(2)}`;
 const bs = (n) => `Bs ${(n || 0).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// Formato venezolano: punto = miles, coma = decimal (ej. "1.250,50" -> 1250.5).
+const formatVEDecimal = (n) => (n || 0).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const parseVEDecimal = (str) => {
+  const cleaned = String(str ?? "").trim().replace(/\./g, "").replace(",", ".");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+};
 const uid = () => Math.random().toString(36).slice(2, 9);
 // UUID real (no el uid() corto de arriba): lo necesitan las columnas uuid de Postgres,
 // como pagos.order_payment_id, generado client-side para poder revertir el pago exacto.
@@ -395,48 +403,68 @@ function LoginScreen({ mode, onLogin, onSwitch }) {
   );
 }
 
-function HomeScreen({ session, sales, setRoute }) {
-  const mine = session.role === "master" ? sales : sales.filter((s) => s.vendorId === session.id);
-  const count = (id) => mine.filter((s) => saleStatus(s.data.items) === id).length;
+function DashCard({ label, value, sub, icon: Icon, tone = "white", testid, wide }) {
+  const tones = {
+    white: "bg-white border-slate-200",
+    emerald: "bg-emerald-50 border-emerald-200",
+    rose: "bg-rose-50 border-rose-200",
+  };
+  const labelTones = { white: "text-slate-400", emerald: "text-emerald-600", rose: "text-rose-600" };
+  const valueTones = { white: "text-slate-800", emerald: "text-emerald-700", rose: "text-rose-700" };
+  return (
+    <div className={`rounded-xl border p-3 shadow-sm ${tones[tone]} ${wide ? "col-span-2" : ""}`} data-testid={testid}>
+      <p className={`text-[10px] uppercase font-semibold flex items-center gap-1 ${labelTones[tone]}`}>{Icon && <Icon className="w-3 h-3" />} {label}</p>
+      <p className={`text-xl font-bold mt-0.5 ${valueTones[tone]}`}>{value}</p>
+      {sub && <p className={`text-[11px] mt-0.5 ${labelTones[tone]}`}>{sub}</p>}
+    </div>
+  );
+}
+
+// Dashboard gerencial por rol. La navegación operativa (Vender, Seguimiento, Clientes,
+// Vendedores) ya vive 1:1 en el Sidebar — este Home ya no la duplica, es solo lectura.
+function HomeScreen({ session, sales, payments, cajas }) {
+  const isMaster = session.role === "master";
+  const todayKey = new Date().toDateString();
+
+  if (isMaster) {
+    const ventasHoyUSD = sales.filter((s) => new Date(s.createdAt).toDateString() === todayKey).reduce((s, x) => s + x.data.total, 0);
+    const turnosAbiertos = cajas.filter((c) => !c.closedAt).length;
+    // "Cuentas por pagar a vendedores": suma histórica de comisiones generadas — todavía
+    // no existe un mecanismo de liquidación/"comisión pagada" (fuera de alcance por ahora).
+    const comisionesTotal = sales.reduce((s, x) => s + (x.data.comisionMonto || 0), 0);
+    const deliverySales = sales.filter((s) => s.data.hasDelivery);
+    const deliveryFeeTotal = deliverySales.reduce((s, x) => s + (x.data.deliveryFee || 0), 0);
+    return (
+      <div className="min-h-screen bg-slate-50" style={{ fontFamily: "system-ui, sans-serif" }}>
+        <TopBar title="ZappoStore" right={<Wordmark size="text-base" />} />
+        <main className="max-w-lg mx-auto px-4 py-5 space-y-3">
+          <p className="text-slate-500 text-sm">Hola, <span className="font-semibold text-slate-800">{session.name}</span>.</p>
+          <div className="grid grid-cols-2 gap-3" data-testid="dashboard-master">
+            <DashCard testid="kpi-ventas-hoy" label="Ventas del día" value={usd(ventasHoyUSD)} icon={DollarSign} />
+            <DashCard testid="kpi-turnos-abiertos" label="Turnos abiertos" value={turnosAbiertos} icon={Wallet} />
+            <DashCard testid="kpi-comisiones-pendientes" tone="rose" wide label="Cuentas por pagar a vendedores" value={usd(comisionesTotal)}
+              icon={Percent} sub="Comisiones generadas, histórico — sin liquidaciones registradas todavía" />
+            <DashCard testid="kpi-delivery" wide label="Delivery" icon={Truck}
+              value={`${deliverySales.length} venta(s)`} sub={`${usd(deliveryFeeTotal)} cobrados en delivery`} />
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  const mySales = sales.filter((s) => s.vendorId === session.id);
+  const myOpenCaja = openCajaOf(cajas, session.id);
+  const miTurnoVendido = myOpenCaja ? cajaTotals(sales, payments, myOpenCaja.id).vendido : 0;
+  const misComisiones = mySales.reduce((s, x) => s + (x.data.comisionMonto || 0), 0);
   return (
     <div className="min-h-screen bg-slate-50" style={{ fontFamily: "system-ui, sans-serif" }}>
       <TopBar title="ZappoStore" right={<Wordmark size="text-base" />} />
-      <main className="max-w-lg mx-auto px-4 py-5 space-y-5">
-        <p className="text-slate-500 text-sm">Hola, <span className="font-semibold text-slate-800">{session.name}</span>. ¿Qué hacemos?</p>
-        <button data-testid="btn-vender" onClick={() => setRoute("sell")}
-          className="w-full bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl p-5 flex items-center gap-3 shadow-sm">
-          <div className="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center"><ShoppingBag className="w-6 h-6" /></div>
-          <div className="text-left"><p className="text-lg font-bold">Vender</p><p className="text-xs text-emerald-50">Tomar un nuevo pedido</p></div>
-        </button>
-        <div>
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2 flex items-center gap-1.5"><ClipboardList className="w-3.5 h-3.5" /> Seguimiento</p>
-          <div className="grid grid-cols-1 gap-2">
-            {SALE_STATES.map((s) => {
-              const Icon = s.icon;
-              return (
-                <button key={s.id} data-testid={`area-${s.id}`} onClick={() => setRoute("seguimiento")}
-                  className="w-full bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-3 hover:border-slate-300">
-                  <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${s.chip}`}><Icon className="w-5 h-5" /></div>
-                  <div className="flex-1 text-left"><p className="text-sm font-semibold text-slate-800">{s.label}</p></div>
-                  <span className="text-lg font-bold text-slate-700">{count(s.id)}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <button data-testid="go-clientes" onClick={() => setRoute("clientes")} className="bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-2 hover:border-slate-300">
-            <Users className="w-4 h-4 text-slate-500" /> <span className="text-sm font-medium text-slate-700">Clientes</span>
-          </button>
-          {session.role === "master" ? (
-            <button data-testid="go-vendedores" onClick={() => setRoute("vendedores")} className="bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-2 hover:border-slate-300">
-              <UserCog className="w-4 h-4 text-slate-500" /> <span className="text-sm font-medium text-slate-700">Vendedores</span>
-            </button>
-          ) : (
-            <button data-testid="go-seguimiento" onClick={() => setRoute("seguimiento")} className="bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-2 hover:border-slate-300">
-              <ClipboardList className="w-4 h-4 text-slate-500" /> <span className="text-sm font-medium text-slate-700">Pedidos</span>
-            </button>
-          )}
+      <main className="max-w-lg mx-auto px-4 py-5 space-y-3">
+        <p className="text-slate-500 text-sm">Hola, <span className="font-semibold text-slate-800">{session.name}</span>.</p>
+        <div className="grid grid-cols-2 gap-3" data-testid="dashboard-vendedor">
+          <DashCard testid="kpi-mi-turno" wide label="Vendido en tu turno" icon={Wallet}
+            value={myOpenCaja ? usd(miTurnoVendido) : "—"} sub={!myOpenCaja ? "No tenés un turno abierto" : null} />
+          <DashCard testid="kpi-mi-comision" wide tone="emerald" label="Tu comisión acumulada" icon={Percent} value={usd(misComisiones)} />
         </div>
       </main>
     </div>
@@ -638,6 +666,24 @@ function ItemEditForm({ draft, onPatch, onSave, onCancel, isNew }) {
   );
 }
 
+function RateInput({ rate, onChange, onCommit }) {
+  const [focused, setFocused] = useState(false);
+  const [raw, setRaw] = useState(formatVEDecimal(rate));
+  useEffect(() => { if (!focused) setRaw(formatVEDecimal(rate)); }, [rate, focused]);
+  return (
+    <input
+      data-testid="input-rate"
+      type="text"
+      inputMode="decimal"
+      value={focused ? raw : formatVEDecimal(rate)}
+      onFocus={() => { setFocused(true); setRaw(formatVEDecimal(rate)); }}
+      onChange={(e) => { setRaw(e.target.value); onChange(parseVEDecimal(e.target.value)); }}
+      onBlur={(e) => { setFocused(false); const n = parseVEDecimal(e.target.value); onChange(n); onCommit && onCommit(n); }}
+      className="w-24 bg-transparent text-emerald-400 font-bold text-xs outline-none text-right"
+    />
+  );
+}
+
 function PaymentPanel({ total, rate, payments, onAdd, onRemove }) {
   const [adding, setAdding] = useState(false);
   const [method, setMethod] = useState("efectivo_usd");
@@ -752,12 +798,28 @@ function ProductPicker({ onPick, onClose }) {
   );
 }
 
+function CajaRequiredScreen({ onGoCaja }) {
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-5" style={{ fontFamily: "system-ui, sans-serif" }}>
+      <div className="bg-white border border-slate-200 rounded-2xl p-6 max-w-sm text-center space-y-3" data-testid="caja-required-screen">
+        <div className="w-14 h-14 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center mx-auto"><Wallet className="w-7 h-7" /></div>
+        <p className="text-lg font-bold text-slate-800">Abrí tu caja primero</p>
+        <p className="text-sm text-slate-500">Para empezar a vender necesitás abrir tu turno de caja. Así queda registrado en qué turno se toma cada pedido.</p>
+        <button data-testid="btn-goto-caja" onClick={onGoCaja} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl py-3 text-sm">Ir a Caja</button>
+      </div>
+    </div>
+  );
+}
+
 function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, onSaved }) {
   const editingExisting = !!initialSale;
   const [online, setOnline] = useState(true);
   const [items, setItems] = useState(initialSale ? initialSale.data.items : []);
   const [client, setClient] = useState(initialSale ? { name: "", phone: "", cedula: "", direccion: "", ...initialSale.data.client } : { name: "", phone: "", cedula: "", direccion: "" });
   const [orderPayments, setOrderPayments] = useState(initialSale ? (initialSale.data.orderPayments || []) : []);
+  const [hasDelivery, setHasDelivery] = useState(initialSale ? !!initialSale.data.hasDelivery : false);
+  const [deliveryFee, setDeliveryFee] = useState(initialSale ? (initialSale.data.deliveryFee || 0) : 0);
+  const [comisionPorcentaje, setComisionPorcentaje] = useState(initialSale ? (initialSale.data.comisionPorcentaje || 0) : 0);
   const [draft, setDraft] = useState(null);
   const [isNew, setIsNew] = useState(true);
   const [showPicker, setShowPicker] = useState(false);
@@ -765,8 +827,12 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
   const [saving, setSaving] = useState(false);
 
   const total = useMemo(() => items.reduce((s, i) => s + lineTotal(i), 0), [items]);
+  // Delivery lo paga el cliente (se suma al total a cobrar); comisión es interno del
+  // vendedor y se calcula SOLO sobre el total de productos, sin el delivery.
+  const grandTotal = useMemo(() => total + (hasDelivery ? Number(deliveryFee) || 0 : 0), [total, hasDelivery, deliveryFee]);
+  const comisionMonto = useMemo(() => (total * (Number(comisionPorcentaje) || 0)) / 100, [total, comisionPorcentaje]);
   const paidUSD = useMemo(() => orderPayments.reduce((s, p) => s + p.amountUSD, 0), [orderPayments]);
-  const balance = Math.max(0, total - paidUSD);
+  const balance = Math.max(0, grandTotal - paidUSD);
   const vStatus = saleStatus(items);
   const pend = pendientesCierre(items);
   const hasPresupuesto = items.some((i) => i.tipo_operacion === "presupuesto");
@@ -787,7 +853,11 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
   const addPayment = (p) => setOrderPayments((prev) => [...prev, p]);
   const removePayment = (id) => setOrderPayments((prev) => prev.filter((p) => p.id !== id));
 
-  const buildData = () => ({ items, client, orderPayments, total, rate, paidUSD, balance });
+  const buildData = () => ({
+    items, client, orderPayments, total: grandTotal, rate, paidUSD, balance,
+    hasDelivery, deliveryFee: hasDelivery ? Number(deliveryFee) || 0 : 0,
+    comisionPorcentaje: Number(comisionPorcentaje) || 0, comisionMonto,
+  });
   const editing = draft !== null;
 
   return (
@@ -803,8 +873,7 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
           </div>
           <div className="flex items-center gap-1 bg-slate-800 rounded-lg px-2 py-1.5">
             <span className="text-[10px] text-slate-400">$=</span>
-            <input data-testid="input-rate" type="number" value={rate} onChange={(e) => setRate(Number(e.target.value) || 0)}
-              onBlur={(e) => onRateBlur && onRateBlur(Number(e.target.value) || 0)} className="w-11 bg-transparent text-emerald-400 font-bold text-xs outline-none" />
+            <RateInput rate={rate} onChange={setRate} onCommit={onRateBlur} />
           </div>
           <button data-testid="btn-toggle-online" onClick={() => setOnline((o) => !o)} className={online ? "text-emerald-400" : "text-rose-400"}>{online ? <RefreshCw className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}</button>
         </div>
@@ -874,7 +943,36 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
                   <input data-testid="input-client-direccion" placeholder="Dirección" value={client.direccion} onChange={(e) => setClient({ ...client, direccion: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
                 </div>
 
-                <PaymentPanel total={total} rate={rate} payments={orderPayments} onAdd={addPayment} onRemove={removePayment} />
+                <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2" data-testid="delivery-panel">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5"><Truck className="w-3.5 h-3.5" /> Delivery</p>
+                    <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+                      <button type="button" data-testid="delivery-no" onClick={() => setHasDelivery(false)} className={`text-xs font-medium rounded-md px-3 py-1 ${!hasDelivery ? "bg-white shadow-sm text-slate-800" : "text-slate-500"}`}>No</button>
+                      <button type="button" data-testid="delivery-si" onClick={() => setHasDelivery(true)} className={`text-xs font-medium rounded-md px-3 py-1 ${hasDelivery ? "bg-white shadow-sm text-slate-800" : "text-slate-500"}`}>Sí</button>
+                    </div>
+                  </div>
+                  {hasDelivery && (
+                    <div className="flex items-center border border-slate-200 rounded-lg px-3">
+                      <span className="text-xs text-slate-400">$</span>
+                      <input data-testid="input-delivery-fee" type="number" min="0" placeholder="0.00" value={deliveryFee}
+                        onChange={(e) => setDeliveryFee(e.target.value)} className="flex-1 py-2 px-2 text-sm outline-none" />
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-slate-50 rounded-xl border border-slate-200 p-3 space-y-2" data-testid="comision-panel">
+                  <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5"><Percent className="w-3.5 h-3.5" /> Comisión (interno, no aparece en la comanda)</p>
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center border border-slate-200 rounded-lg px-3 flex-1">
+                      <input data-testid="input-comision-pct" type="number" min="0" max="100" placeholder="0" value={comisionPorcentaje}
+                        onChange={(e) => setComisionPorcentaje(e.target.value)} className="flex-1 py-2 px-1 text-sm outline-none" />
+                      <span className="text-xs text-slate-400">%</span>
+                    </div>
+                    <span className="text-sm font-bold text-slate-700" data-testid="comision-monto">{usd(comisionMonto)}</span>
+                  </div>
+                </div>
+
+                <PaymentPanel total={grandTotal} rate={rate} payments={orderPayments} onAdd={addPayment} onRemove={removePayment} />
               </>
             )}
           </div>
@@ -888,7 +986,7 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
             <div className="flex items-center gap-3">
               <div>
                 <p className="text-[10px] text-slate-400 uppercase">Total</p>
-                <div className="flex items-baseline gap-2"><span className="text-xl font-bold" data-testid="total-usd">{usd(total)}</span><span className="text-sm text-emerald-400 font-semibold" data-testid="total-bs">{bs(total * rate)}</span></div>
+                <div className="flex items-baseline gap-2"><span className="text-xl font-bold" data-testid="total-usd">{usd(grandTotal)}</span><span className="text-sm text-emerald-400 font-semibold" data-testid="total-bs">{bs(grandTotal * rate)}</span></div>
               </div>
               <div className="flex-1" />
               <button data-testid="btn-add-another-bottom" onClick={() => setShowPicker(true)} className="border border-slate-700 text-slate-200 rounded-xl px-3 py-3 text-sm flex items-center gap-1.5"><Plus className="w-4 h-4" /> Producto</button>
@@ -933,7 +1031,7 @@ function ProcesoChecklist({ label, Icon, procesos, done, catalog }) {
 }
 
 function ComandaModal({ session, data, onClose, onFinalize, readOnly, saleMeta, saving }) {
-  const { items, client, orderPayments, total, rate, paidUSD, balance } = data;
+  const { items, client, orderPayments, total, rate, paidUSD, balance, hasDelivery, deliveryFee } = data;
   const [tab, setTab] = useState("comanda");
   const grupos = [
     { id: "pedido", label: "Pedido", icon: Tag, items },
@@ -1044,6 +1142,12 @@ function ComandaModal({ session, data, onClose, onFinalize, readOnly, saleMeta, 
               ))}
 
               <div className="border-t border-slate-100 pt-2 space-y-2">
+                {hasDelivery && (
+                  <div className="flex justify-between text-xs text-slate-500 zs-ticket-fine" data-testid="comanda-delivery">
+                    <span className="flex items-center gap-1"><Truck className="w-3 h-3" /> Delivery</span>
+                    <span className="font-medium text-slate-700">{usd(deliveryFee)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between zs-ticket-total font-bold text-slate-900">
                   <span>Total Pedido</span>
                   <span>{usd(total)} · <span className="text-emerald-600">{bs(total * rate)}</span></span>
@@ -1257,11 +1361,38 @@ function ClienteDetail({ session, clientId, sales, clients, onBack, onView }) {
   );
 }
 
-function VendedoresScreen({ vendors, sales, onAdd, onToggle, onOpen }) {
+function VendorEditForm({ vendor, onSave, onCancel }) {
+  const [form, setForm] = useState({ name: vendor.name, cedula: vendor.cedula, password: "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const save = async () => {
+    if (!form.name.trim() || !form.cedula.trim()) return;
+    setSaving(true); setError("");
+    const res = await onSave({ id: vendor.id, name: form.name.trim(), cedula: form.cedula.trim(), password: form.password.trim() });
+    setSaving(false);
+    if (res && res.error) { setError(res.error); return; }
+    onCancel();
+  };
+  return (
+    <div className="bg-white rounded-xl border border-emerald-200 p-3 space-y-2" data-testid={`vendor-edit-form-${vendor.id}`}>
+      <input data-testid="vendor-edit-name" placeholder="Nombre" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
+      <input data-testid="vendor-edit-cedula" placeholder="Cédula (usuario)" value={form.cedula} onChange={(e) => setForm({ ...form, cedula: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
+      <input data-testid="vendor-edit-password" placeholder="Nueva contraseña (dejar en blanco para no cambiarla)" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
+      {error && <p data-testid="vendor-edit-error" className="text-xs text-rose-500">{error}</p>}
+      <div className="flex gap-2">
+        <button data-testid="btn-cancel-edit-vendor" onClick={onCancel} className="flex-1 border border-slate-200 rounded-lg py-2 text-xs font-medium text-slate-500">Cancelar</button>
+        <button data-testid="btn-save-edit-vendor" onClick={save} disabled={saving} className="flex-[2] bg-emerald-500 text-white font-bold rounded-lg py-2 text-sm disabled:opacity-60">{saving ? "Guardando..." : "Guardar cambios"}</button>
+      </div>
+    </div>
+  );
+}
+
+function VendedoresScreen({ vendors, sales, onAdd, onToggle, onUpdate, onOpen }) {
   const [form, setForm] = useState({ name: "", cedula: "", password: "" });
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [editingId, setEditingId] = useState(null);
   const add = async () => {
     if (!form.name.trim() || !form.cedula.trim() || !form.password.trim()) return;
     setSaving(true); setError("");
@@ -1286,12 +1417,16 @@ function VendedoresScreen({ vendors, sales, onAdd, onToggle, onOpen }) {
         {vendors.map((v) => {
           const vs = sales.filter((s) => s.vendorId === v.id);
           const tot = vs.reduce((a, s) => a + s.data.total, 0);
+          if (editingId === v.id) {
+            return <VendorEditForm key={v.id} vendor={v} onSave={onUpdate} onCancel={() => setEditingId(null)} />;
+          }
           return (
             <div key={v.id} className="bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-3" data-testid={`vendor-${v.id}`}>
               <button onClick={() => onOpen(v.id)} className="flex items-center gap-3 flex-1 text-left">
                 <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"><User className="w-5 h-5" /></div>
                 <div className="flex-1 min-w-0"><p className="text-sm font-semibold text-slate-800 truncate">{v.name}</p><p className="text-xs text-slate-400">{v.cedula} · {vs.length} venta(s) · {usd(tot)}</p></div>
               </button>
+              <button data-testid={`edit-vendor-${v.id}`} onClick={() => setEditingId(v.id)} className="text-slate-400 hover:text-emerald-600"><Pencil className="w-3.5 h-3.5" /></button>
               <button data-testid={`toggle-vendor-${v.id}`} onClick={() => onToggle(v.id)} className={`text-[10px] font-bold rounded-full px-2 py-1 ${v.active ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{v.active ? "Activo" : "Inactivo"}</button>
             </div>
           );
@@ -1437,8 +1572,66 @@ function PeriodTabs({ value, onChange }) {
   );
 }
 
-function CajaScreen({ session, sales, payments, cajas, onOpenCaja, onCloseCaja }) {
+function CajaCloseSummaryModal({ caja, totals, countedUSD, countedVES, rate, onCancel, onConfirm }) {
+  const cashInUSD = totals.porMetodo.efectivo_usd || 0;
+  const cashInVES = totals.porMetodo.efectivo_bs || 0;
+  const expectedCashUSD = caja.openingCashUSD + caja.openingCashVES / (rate || 1) + cashInUSD + cashInVES;
+  const countedTotalUSD = (Number(countedUSD) || 0) + (Number(countedVES) || 0) / (rate || 1);
+  const varianceUSD = countedTotalUSD - expectedCashUSD;
+  const cuadra = Math.abs(varianceUSD) < 0.01;
+  const metodoIcon = { efectivo_usd: DollarSign, efectivo_bs: Banknote, tarjeta: CreditCard, pago_movil: Smartphone };
+  return (
+    <div className="fixed inset-0 z-40 bg-slate-900/60 flex items-end sm:items-center justify-center">
+      <div className="bg-white w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl max-h-[92vh] overflow-auto" data-testid="caja-close-summary-modal">
+        <div className="sticky top-0 bg-slate-900 text-white px-4 py-3 flex items-center gap-2">
+          <Wallet className="w-4 h-4 text-emerald-400" /><h3 className="font-bold flex-1">Resumen de cierre</h3>
+        </div>
+        <div className="p-4 space-y-3 text-sm">
+          <div className="flex justify-between text-xs text-slate-500">
+            <span>Apertura: {fmtTime(caja.openedAt)}</span>
+            <span>Cierre: {fmtTime(new Date().toISOString())}</span>
+          </div>
+          <div className="bg-slate-50 rounded-xl border border-slate-200 p-3 flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-500 uppercase">Total facturado</span>
+            <span className="text-lg font-bold text-slate-800" data-testid="summary-vendido">{usd(totals.vendido)}</span>
+          </div>
+          <div className="bg-white rounded-xl border border-slate-200 p-3">
+            <p className="text-[11px] font-semibold text-slate-400 uppercase mb-1.5">Por método de pago</p>
+            <div className="grid grid-cols-4 gap-1.5">
+              {PAY_METHODS.map((m) => {
+                const Icon = metodoIcon[m.id];
+                return (
+                  <div key={m.id} className="flex flex-col items-center gap-0.5 rounded-lg py-2 border border-slate-100 bg-slate-50">
+                    <Icon className="w-3.5 h-3.5 text-slate-500" />
+                    <span className="text-[9px] text-slate-500">{m.label}</span>
+                    <span className="text-[11px] font-bold text-slate-700">{usd(totals.porMetodo[m.id] || 0)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className={`rounded-xl border p-3 ${cuadra ? "bg-slate-50 border-slate-200" : varianceUSD > 0 ? "bg-emerald-50 border-emerald-200" : "bg-rose-50 border-rose-200"}`} data-testid="summary-cuadre">
+            <p className="text-[10px] uppercase font-semibold text-slate-500">Cuadre de efectivo</p>
+            <div className="flex justify-between text-xs mt-1"><span className="text-slate-500">Esperado</span><span className="font-medium">{usd(expectedCashUSD)}</span></div>
+            <div className="flex justify-between text-xs"><span className="text-slate-500">Contado</span><span className="font-medium">{usd(countedTotalUSD)}</span></div>
+            <div className="flex justify-between text-xs font-bold mt-1">
+              <span>{cuadra ? "Cuadra" : varianceUSD > 0 ? "Sobrante" : "Faltante"}</span>
+              <span>{usd(Math.abs(varianceUSD))}</span>
+            </div>
+          </div>
+          <div className="flex gap-2 pt-1">
+            <button data-testid="btn-cancel-summary" onClick={onCancel} className="flex-1 border border-slate-200 rounded-xl py-3 text-sm font-medium text-slate-500">Volver</button>
+            <button data-testid="btn-confirm-summary" onClick={onConfirm} className="flex-[2] bg-rose-500 hover:bg-rose-600 text-white font-bold rounded-xl py-3 text-sm">Confirmar cierre</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CajaScreen({ session, sales, payments, cajas, rate, onOpenCaja, onCloseCaja }) {
   const [closing, setClosing] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
   const [countedUSD, setCountedUSD] = useState("");
   const [countedVES, setCountedVES] = useState("");
   const [periodTab, setPeriodTab] = useState("hoy");
@@ -1508,7 +1701,8 @@ function CajaScreen({ session, sales, payments, cajas, onOpenCaja, onCloseCaja }
 
   const current = openCajaOf(cajas, session.id);
   const misCerradas = cajas.filter((c) => c.vendorId === session.id && c.closedAt && inRange(c.closedAt)).sort((a, b) => new Date(b.closedAt) - new Date(a.closedAt));
-  const doClose = () => { onCloseCaja(current.id, countedUSD, countedVES); setClosing(false); setCountedUSD(""); setCountedVES(""); };
+  const currentTotals = current ? cajaTotals(sales, payments, current.id) : null;
+  const doClose = () => { onCloseCaja(current.id, countedUSD, countedVES); setShowSummary(false); setClosing(false); setCountedUSD(""); setCountedVES(""); };
 
   return (
     <div className="min-h-screen bg-slate-50 pb-6" style={{ fontFamily: "system-ui, sans-serif" }}>
@@ -1522,7 +1716,7 @@ function CajaScreen({ session, sales, payments, cajas, onOpenCaja, onCloseCaja }
               <div><p className="text-xs text-slate-400">Turno abierto</p><p className="text-sm font-bold">{fmtTime(current.openedAt)}</p></div>
               <div className="text-right"><p className="text-xs text-slate-400">Fondo inicial</p><p className="text-sm font-bold">{usd(current.openingCashUSD)} · {bs(current.openingCashVES)}</p></div>
             </div>
-            <CajaBreakdown totals={cajaTotals(sales, payments, current.id)} caja={current} />
+            <CajaBreakdown totals={currentTotals} caja={current} />
             <div>
               <p className="text-xs font-semibold text-slate-400 uppercase mb-2">Ventas del turno</p>
               <div className="space-y-2">
@@ -1549,7 +1743,7 @@ function CajaScreen({ session, sales, payments, cajas, onOpenCaja, onCloseCaja }
                 </div>
                 <div className="flex gap-2">
                   <button data-testid="btn-cancel-close" onClick={() => setClosing(false)} className="flex-1 border border-slate-200 rounded-xl py-2.5 text-sm font-medium text-slate-500">Cancelar</button>
-                  <button data-testid="btn-confirm-close" onClick={doClose} className="flex-[2] bg-rose-500 hover:bg-rose-600 text-white font-bold rounded-xl py-2.5 text-sm">Confirmar cierre</button>
+                  <button data-testid="btn-confirm-close" onClick={() => setShowSummary(true)} className="flex-[2] bg-rose-500 hover:bg-rose-600 text-white font-bold rounded-xl py-2.5 text-sm">Ver resumen y cerrar</button>
                 </div>
               </div>
             )}
@@ -1557,6 +1751,10 @@ function CajaScreen({ session, sales, payments, cajas, onOpenCaja, onCloseCaja }
         )}
         {historyBlock(misCerradas, "caja-hist", false)}
       </main>
+      {showSummary && current && (
+        <CajaCloseSummaryModal caja={current} totals={currentTotals} countedUSD={countedUSD} countedVES={countedVES} rate={rate}
+          onCancel={() => setShowSummary(false)} onConfirm={doClose} />
+      )}
     </div>
   );
 }
@@ -1787,6 +1985,8 @@ export default function App() {
         items,
         client: row.clientes ? { name: row.clientes.name || "", phone: row.clientes.phone || "", cedula: row.clientes.cedula || "", direccion: row.clientes.direccion || "" } : { name: "", phone: "", cedula: "", direccion: "" },
         orderPayments, total, rate: Number(row.rate_snap), paidUSD, balance,
+        hasDelivery: !!row.has_delivery, deliveryFee: Number(row.delivery_fee) || 0,
+        comisionPorcentaje: Number(row.comision_porcentaje) || 0, comisionMonto: Number(row.comision_monto) || 0,
       },
       audit,
     };
@@ -1946,7 +2146,11 @@ export default function App() {
     if (!existingId) {
       const { data: pedidoRow, error: pedidoErr } = await supabase
         .from("pedidos")
-        .insert({ vendedor_id: session.id, cliente_id: clientId, total: data.total, rate_snap: data.rate, caja_id: myCaja ? myCaja.id : null })
+        .insert({
+          vendedor_id: session.id, cliente_id: clientId, total: data.total, rate_snap: data.rate, caja_id: myCaja ? myCaja.id : null,
+          has_delivery: !!data.hasDelivery, delivery_fee: data.deliveryFee || 0,
+          comision_porcentaje: data.comisionPorcentaje || 0, comision_monto: data.comisionMonto || 0,
+        })
         .select()
         .single();
       if (pedidoErr) { console.error("saveSale: insert pedido:", pedidoErr); return; }
@@ -2003,7 +2207,11 @@ export default function App() {
     if (removedPayments.length > 0) payDetail += ` · ${removedPayments.length} pago(s) anulado(s) (${usd(removedPayments.reduce((s, e) => s + e.amountUSD, 0))})`;
 
     if (existingId) {
-      await supabase.from("pedidos").update({ cliente_id: clientId, total: data.total, rate_snap: data.rate, updated_at: new Date().toISOString() }).eq("id", saleId);
+      await supabase.from("pedidos").update({
+        cliente_id: clientId, total: data.total, rate_snap: data.rate, updated_at: new Date().toISOString(),
+        has_delivery: !!data.hasDelivery, delivery_fee: data.deliveryFee || 0,
+        comision_porcentaje: data.comisionPorcentaje || 0, comision_monto: data.comisionMonto || 0,
+      }).eq("id", saleId);
       await supabase.from("audit_log").insert({ entity: "pedido", entity_id: saleId, action: "Editó el pedido", detail: `Total ${usd(data.total)} · ${data.items.length} prod.${payDetail}`, user_id: session.id, user_name: session.name });
     } else {
       await supabase.from("audit_log").insert({ entity: "pedido", entity_id: saleId, action: "Creó el pedido", detail: `Total ${usd(data.total)}${payDetail}`, user_id: session.id, user_name: session.name });
@@ -2093,6 +2301,17 @@ export default function App() {
     const { error } = await supabase.from("vendedores").update({ active: !target.active }).eq("id", id);
     if (!error) setVendors((p) => p.map((v) => (v.id === id ? { ...v, active: !v.active } : v)));
   };
+  // Editar vendedor (nombre/cédula/clave): la cédula determina el email sintético
+  // de Auth y la clave solo puede resetearse con la Service Role Key — mismo
+  // motivo por el que el alta pasa por una Edge Function (update-vendor).
+  const updateVendor = async (v) => {
+    const { data, error } = await supabase.functions.invoke("update-vendor", {
+      body: { id: v.id, name: v.name, cedula: v.cedula, password: v.password || undefined },
+    });
+    if (error) return { error: error.message || "No se pudo editar el vendedor." };
+    if (data && data.error) return { error: data.error };
+    await loadVendors();
+  };
 
   if (!sessionChecked) {
     return (
@@ -2109,16 +2328,20 @@ export default function App() {
     <div className="flex h-screen overflow-hidden bg-slate-50">
       <Sidebar route={route} setRoute={nav} session={session} onLogout={logout} />
       <div className="flex-1 overflow-auto">
-        {route === "home" && <HomeScreen session={session} sales={sales} setRoute={nav} />}
-        {route === "sell" && <SellScreen session={session} rate={rate} setRate={setRate} onRateBlur={persistRate} initialSale={editSale} onExit={() => { setEditSale(null); setRoute("home"); }} onSaved={saveSale} />}
+        {route === "home" && <HomeScreen session={session} sales={sales} payments={payments} cajas={cajas} />}
+        {route === "sell" && (
+          session.role === "vendedor" && !editSale && !openCajaOf(cajas, session.id)
+            ? <CajaRequiredScreen onGoCaja={() => nav("caja")} />
+            : <SellScreen session={session} rate={rate} setRate={setRate} onRateBlur={persistRate} initialSale={editSale} onExit={() => { setEditSale(null); setRoute("home"); }} onSaved={saveSale} />
+        )}
         {route === "seguimiento" && <SeguimientoScreen session={session} sales={sales} onSetItemState={setItemState} onToggleProceso={toggleProceso} onView={(s) => setViewSale(s)} onEdit={(s) => { setEditSale(s); setRoute("sell"); }} />}
         {route === "clientes" && (openClient
           ? <ClienteDetail session={session} clientId={openClient} sales={sales} clients={clients} onBack={() => setOpenClient(null)} onView={(s) => setViewSale(s)} />
           : <ClientesScreen session={session} sales={sales} clients={clients} onOpen={(id) => setOpenClient(id)} />)}
         {route === "vendedores" && session.role === "master" && (openVendor
           ? <VendedorDetail vendorId={openVendor} vendors={vendors} sales={sales} onBack={() => setOpenVendor(null)} onView={(s) => setViewSale(s)} />
-          : <VendedoresScreen vendors={vendors} sales={sales} onAdd={addVendor} onToggle={toggleVendor} onOpen={(id) => setOpenVendor(id)} />)}
-        {route === "caja" && <CajaScreen session={session} sales={sales} payments={payments} cajas={cajas} onOpenCaja={openCaja} onCloseCaja={closeCaja} />}
+          : <VendedoresScreen vendors={vendors} sales={sales} onAdd={addVendor} onToggle={toggleVendor} onUpdate={updateVendor} onOpen={(id) => setOpenVendor(id)} />)}
+        {route === "caja" && <CajaScreen session={session} sales={sales} payments={payments} cajas={cajas} rate={rate} onOpenCaja={openCaja} onCloseCaja={closeCaja} />}
         {route === "resumen" && session.role === "master" && <ResumenFinancieroScreen sales={sales} payments={payments} />}
         {route === "reportes" && session.role === "master" && (
           <ReportesScreen sales={sales} clients={clients} vendors={vendors}

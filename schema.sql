@@ -32,6 +32,12 @@
 --   • exchange_rates pasó de useState local (una tasa distinta por navegador)
 --     a compartida de verdad; el cambio pasa por set_active_rate() para que
 --     sea atómico entre vendedores.
+-- Cambios v0.9 (delivery + comisión por pedido):
+--   • pedidos.has_delivery/delivery_fee: delivery opcional, visible para el
+--     cliente (se suma al total que paga, aparece en la comanda impresa).
+--   • pedidos.comision_porcentaje/comision_monto: comisión interna del
+--     vendedor sobre ESA venta, calculada solo sobre el total de productos
+--     (sin el delivery) — nunca aparece en la comanda del cliente.
 -- ============================================================================
 create extension if not exists "pgcrypto";
 
@@ -133,7 +139,14 @@ create table if not exists pedidos (
   -- se deriva de la tabla "pagos" — ver vista v_pedido_saldo más abajo.
   client_ref   uuid unique,                          -- idempotencia offline
   created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now()
+  updated_at   timestamptz not null default now(),
+  -- Delivery: opcional, lo paga el cliente — delivery_fee ya está incluido en "total".
+  has_delivery        boolean not null default false,
+  delivery_fee        numeric(14,2) not null default 0,
+  -- Comisión del vendedor sobre esta venta (interno, nunca en la comanda del
+  -- cliente). Calculada solo sobre el total de productos, sin el delivery.
+  comision_porcentaje numeric(5,2) not null default 0,
+  comision_monto      numeric(14,2) not null default 0
 );
 create index if not exists idx_pedidos_vendedor on pedidos (vendedor_id, created_at desc);
 
