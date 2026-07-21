@@ -35,7 +35,7 @@ Módulos y su estado:
 | Gastos/Marketing | 🔜 No empezado |
 | Liquidación de comisiones (marcar una comisión como "pagada al vendedor") | ⏭️ No empezado — hoy solo se ve la suma histórica generada |
 
-**Bloqueado en:** decisión de negocio del cliente (no de código) — confirmar si paga Supabase Pro ($25/mes, backups + sin auto-pausa) antes de encarar el deploy a producción (Vercel/Netlify + dominio).
+**Ya deployado (demo gratis):** https://zappostore.vercel.app (Vercel, redeploy automático en cada push a `main`). **Pendiente real:** decisión de negocio del cliente sobre pagar Supabase Pro ($25/mes, backups + sin auto-pausa) antes de depender de esto para uso real del taller — ya no bloquea que el cliente pruebe la app, solo bloquea el paso siguiente. Ojo: el plan free de Supabase se auto-pausa tras ~1 semana sin actividad.
 
 ## Modelo de datos (resumen — `schema.sql` v0.10 es la fuente de verdad completa)
 

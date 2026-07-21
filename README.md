@@ -3,6 +3,8 @@
 POS + control de producción para taller textil (remeras, gorras, estampado/bordado).
 Bimoneda USD/Bs, inspirado en **Fina** (Venezuela), evolucionando hacia un ERP/Kanban de producción con layout fijo para tablet/desktop.
 
+**Demo en vivo:** https://zappostore.vercel.app (deploy gratuito en Vercel, redeploya solo en cada push a `main`. El backend corre sobre el plan free de Supabase, que se auto-pausa tras ~1 semana sin actividad — si no carga, revisar el dashboard de Supabase.)
+
 ## Correr
 ```bash
 npm install
@@ -37,7 +39,7 @@ Login **real** con Supabase Auth (ya no hay credenciales demo hardcodeadas). Hay
 
 **Hecho:** todo lo de arriba, más `schema.sql` alineado (v0.10) y corrido contra el proyecto real.
 **Sigue (próximo, de producto):** Inventario/Stock, Gastos/Estadísticas, filtrar Resumen/Reportes por fecha en vez de histórico global, un mecanismo real de liquidación de comisiones (hoy "Cuentas por pagar a vendedores" es solo la suma histórica generada, no hay forma de marcar una comisión como pagada).
-**Sigue (próximo, de negocio):** llevar esto a producción real con el cliente — frenado esperando que confirme si paga el plan Pro de Supabase (backups + sin auto-pausa). Cuando se confirme, sigue un deploy guiado del frontend (Vercel/Netlify + dominio).
+**Sigue (próximo, de negocio):** ya está deployado gratis para que el cliente pruebe (https://zappostore.vercel.app) — lo que sigue es su feedback, y más adelante confirmar si paga el plan Pro de Supabase (backups + sin auto-pausa) para pasar a uso real del taller.
 
 Detalle completo de decisiones, modelo de datos y pendientes abiertos: ver `CONTEXTO.md`.
 
