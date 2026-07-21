@@ -6,7 +6,7 @@ import {
   Lock, Eye, EyeOff, ShoppingBag, Pencil, Clock,
   PackageCheck, CheckCircle2, ClipboardList, Home, Users, UserCog,
   Wallet, Boxes, FileText, BarChart3, History, ShieldCheck, TrendingUp,
-  Truck, Percent,
+  Truck, Percent, AlertTriangle,
 } from "lucide-react";
 
 import { FROG_LOGO } from "./assets/logo.js";
@@ -137,6 +137,12 @@ function saleStatus(items) {
   return "en_curso";
 }
 const pendientesCierre = (items) => items.filter((i) => i.estado !== "cerrado").length;
+// Un producto solo puede pasar a "Cerrado" si TODOS sus procesos de Taller/Diseño
+// elegidos ya están marcados como completados (Kanban). Si no eligió ningún proceso,
+// no hay nada que completar y queda libre (every() de un array vacío es true).
+const proceduresComplete = (it) =>
+  it.procesos_taller.every((p) => it.procesos_taller_done.includes(p)) &&
+  it.procesos_diseno.every((p) => it.procesos_diseno_done.includes(p));
 function optimizeImage(file, dim = 260) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -645,13 +651,19 @@ function ItemEditForm({ draft, onPatch, onSave, onCancel, isNew }) {
 
       <div className="bg-white rounded-xl border border-slate-200 p-3">
         <p className="text-[11px] font-semibold text-slate-400 uppercase mb-1.5">Estado de este producto</p>
+        {!proceduresComplete(draft) && (
+          <p className="text-[11px] text-amber-600 mb-1.5">Faltan procesos de Taller/Diseño por completar (Kanban en Seguimiento) para poder cerrarlo.</p>
+        )}
         <div className="grid grid-cols-3 gap-1.5" data-testid="estado-selector">
-          {ITEM_STATES.map((s) => (
-            <button key={s.id} data-testid={`estado-${s.id}`} onClick={() => onPatch({ estado: s.id })}
-              className={`flex items-center gap-1.5 rounded-lg px-2 py-2 border text-[11px] font-medium ${draft.estado === s.id ? "border-slate-900 bg-slate-50" : "border-slate-200 text-slate-500"}`}>
+          {ITEM_STATES.map((s) => {
+            const blocked = s.id === "cerrado" && !proceduresComplete(draft);
+            return (
+            <button key={s.id} data-testid={`estado-${s.id}`} onClick={() => onPatch({ estado: s.id })} disabled={blocked}
+              className={`flex items-center gap-1.5 rounded-lg px-2 py-2 border text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed ${draft.estado === s.id ? "border-slate-900 bg-slate-50" : "border-slate-200 text-slate-500"}`}>
               <span className={`w-2 h-2 rounded-full ${s.dot}`} /> {s.label}
             </button>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -677,8 +689,8 @@ function RateInput({ rate, onChange, onCommit }) {
       inputMode="decimal"
       value={focused ? raw : formatVEDecimal(rate)}
       onFocus={() => { setFocused(true); setRaw(formatVEDecimal(rate)); }}
-      onChange={(e) => { setRaw(e.target.value); onChange(parseVEDecimal(e.target.value)); }}
-      onBlur={(e) => { setFocused(false); const n = parseVEDecimal(e.target.value); onChange(n); onCommit && onCommit(n); }}
+      onChange={(e) => { setRaw(e.target.value); const n = parseVEDecimal(e.target.value); if (n > 0) onChange(n); }}
+      onBlur={(e) => { setFocused(false); const n = parseVEDecimal(e.target.value); if (n > 0) { onChange(n); onCommit && onCommit(n); } }}
       className="w-24 bg-transparent text-emerald-400 font-bold text-xs outline-none text-right"
     />
   );
@@ -836,6 +848,14 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
   const vStatus = saleStatus(items);
   const pend = pendientesCierre(items);
   const hasPresupuesto = items.some((i) => i.tipo_operacion === "presupuesto");
+  // Si el carrito mezcla "venta" y "presupuesto", el guard de saveSale corta el guardado
+  // COMPLETO (ni siquiera se guardan los productos de venta real) — se avisa explícito
+  // porque solo cambiar el botón a "Imprimir Presupuesto" no deja clara esa consecuencia.
+  const isMixedCart = hasPresupuesto && items.some((i) => i.tipo_operacion !== "presupuesto");
+  // Una venta real necesita nombre + teléfono del cliente (los usa el sistema para
+  // identificar/de-duplicar en findOrCreateClient); un presupuesto no se guarda como
+  // pedido, así que puede seguir imprimiéndose sin datos de cliente.
+  const clientDataMissing = !hasPresupuesto && !(client.name.trim() && client.phone.trim());
 
   const blank = (p) => ({
     id: uid(), productId: p.id, name: p.id === "otro" ? "" : p.name, emoji: p.emoji,
@@ -919,12 +939,16 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
                         </div>
                       </div>
                       <div className="flex items-center gap-1 mt-2 flex-wrap" data-testid={`quick-estado-${it.id}`}>
-                        {ITEM_STATES.map((s) => (
-                          <button key={s.id} data-testid={`quick-estado-${it.id}-${s.id}`} onClick={() => quickEstado(it.id, s.id)}
-                            className={`flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-1 border ${it.estado === s.id ? "border-slate-900 bg-slate-50" : "border-slate-200 text-slate-400"}`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} /> {s.label}
-                          </button>
-                        ))}
+                        {ITEM_STATES.map((s) => {
+                          const blocked = s.id === "cerrado" && !proceduresComplete(it);
+                          return (
+                            <button key={s.id} data-testid={`quick-estado-${it.id}-${s.id}`} onClick={() => quickEstado(it.id, s.id)} disabled={blocked}
+                              title={blocked ? "Faltan procesos de Taller/Diseño por completar" : undefined}
+                              className={`flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-1 border disabled:opacity-40 disabled:cursor-not-allowed ${it.estado === s.id ? "border-slate-900 bg-slate-50" : "border-slate-200 text-slate-400"}`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} /> {s.label}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   ))}
@@ -933,9 +957,13 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
                 <button data-testid="btn-add-another" onClick={() => setShowPicker(true)} className="w-full border border-dashed border-slate-300 rounded-xl py-2.5 text-sm font-medium text-slate-500 hover:border-emerald-400 hover:text-emerald-600 flex items-center justify-center gap-1.5"><Plus className="w-4 h-4" /> Agregar otro producto</button>
 
                 <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
-                  <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5"><User className="w-3.5 h-3.5" /> Cliente</p>
-                  <input data-testid="input-client-name" placeholder="Nombre" value={client.name} onChange={(e) => setClient({ ...client, name: e.target.value })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-400" />
-                  <div className="flex items-center border border-slate-200 rounded-lg px-3 focus-within:border-emerald-400">
+                  <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
+                    <User className="w-3.5 h-3.5" /> Cliente
+                    {!hasPresupuesto && <span className="text-[10px] font-normal text-slate-400 normal-case">· nombre y teléfono obligatorios para cerrar la venta</span>}
+                  </p>
+                  <input data-testid="input-client-name" placeholder="Nombre" value={client.name} onChange={(e) => setClient({ ...client, name: e.target.value })}
+                    className={`w-full border rounded-lg px-3 py-2 text-sm outline-none ${clientDataMissing && !client.name.trim() ? "border-rose-300" : "border-slate-200 focus:border-emerald-400"}`} />
+                  <div className={`flex items-center border rounded-lg px-3 focus-within:border-emerald-400 ${clientDataMissing && !client.phone.trim() ? "border-rose-300" : "border-slate-200"}`}>
                     <Phone className="w-4 h-4 text-slate-400" />
                     <input data-testid="input-client-phone" placeholder="WhatsApp / teléfono" value={client.phone} onChange={(e) => setClient({ ...client, phone: e.target.value })} className="flex-1 py-2 px-2 text-sm outline-none" />
                   </div>
@@ -983,6 +1011,8 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
         <div className="fixed bottom-0 inset-x-0 z-20 bg-slate-900 text-white">
           <div className="max-w-lg mx-auto px-4 py-3">
             {pend > 0 && <p className="text-[11px] text-amber-400 mb-1.5 flex items-center gap-1"><Clock className="w-3 h-3" /> Faltan {pend} producto(s) por cerrar para cerrar la venta</p>}
+            {isMixedCart && <p className="text-[11px] text-amber-400 mb-1.5 flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Este pedido mezcla Venta y Presupuesto: al imprimir NO se guarda ningún producto, ni siquiera los de venta directa</p>}
+            {clientDataMissing && <p className="text-[11px] text-rose-400 mb-1.5 flex items-center gap-1"><User className="w-3 h-3" /> Completá nombre y teléfono del cliente para cerrar la venta</p>}
             <div className="flex items-center gap-3">
               <div>
                 <p className="text-[10px] text-slate-400 uppercase">Total</p>
@@ -990,8 +1020,8 @@ function SellScreen({ session, rate, setRate, onRateBlur, initialSale, onExit, o
               </div>
               <div className="flex-1" />
               <button data-testid="btn-add-another-bottom" onClick={() => setShowPicker(true)} className="border border-slate-700 text-slate-200 rounded-xl px-3 py-3 text-sm flex items-center gap-1.5"><Plus className="w-4 h-4" /> Producto</button>
-              <button data-testid="btn-close-sale" onClick={() => setShowComanda(true)}
-                className={`flex items-center gap-2 text-white font-bold rounded-xl px-4 py-3 text-sm ${hasPresupuesto ? "bg-blue-600 hover:bg-blue-700" : "bg-emerald-500 hover:bg-emerald-600"}`}>
+              <button data-testid="btn-close-sale" onClick={() => setShowComanda(true)} disabled={clientDataMissing}
+                className={`flex items-center gap-2 text-white font-bold rounded-xl px-4 py-3 text-sm disabled:opacity-40 disabled:cursor-not-allowed ${hasPresupuesto ? "bg-blue-600 hover:bg-blue-700" : "bg-emerald-500 hover:bg-emerald-600"}`}>
                 {hasPresupuesto ? <><Printer className="w-4 h-4" /> Imprimir Presupuesto</> : <><Check className="w-4 h-4" /> {editingExisting ? "Guardar" : "Cerrar venta"}</>}
               </button>
             </div>
@@ -1238,12 +1268,16 @@ function SeguimientoScreen({ session, sales, onSetItemState, onToggleProceso, on
                     <div key={it.id} className="space-y-1.5">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-xs font-semibold text-slate-700 flex-1 truncate">{it.name}</span>
-                        {ITEM_STATES.map((s) => (
-                          <button key={s.id} data-testid={`set-${sale.id}-${it.id}-${s.id}`} onClick={() => onSetItemState(sale.id, it.id, s.id)}
-                            className={`text-[9px] font-medium rounded-full px-2 py-1 border ${it.estado === s.id ? "border-slate-900 bg-slate-50" : "border-slate-200 text-slate-400"}`}>
-                            <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.dot} mr-1`} />{s.label}
-                          </button>
-                        ))}
+                        {ITEM_STATES.map((s) => {
+                          const blocked = s.id === "cerrado" && !proceduresComplete(it);
+                          return (
+                            <button key={s.id} data-testid={`set-${sale.id}-${it.id}-${s.id}`} onClick={() => onSetItemState(sale.id, it.id, s.id)} disabled={blocked}
+                              title={blocked ? "Faltan procesos de Taller/Diseño por completar" : undefined}
+                              className={`text-[9px] font-medium rounded-full px-2 py-1 border disabled:opacity-40 disabled:cursor-not-allowed ${it.estado === s.id ? "border-slate-900 bg-slate-50" : "border-slate-200 text-slate-400"}`}>
+                              <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.dot} mr-1`} />{s.label}
+                            </button>
+                          );
+                        })}
                       </div>
                       {(it.procesos_taller.length > 0 || it.procesos_diseno.length > 0) && (
                         <div className="grid grid-cols-2 gap-2 bg-slate-50 rounded-lg p-2">
@@ -2093,6 +2127,8 @@ export default function App() {
   const saveSale = async (data, existingId) => {
     // Los presupuestos solo se imprimen: nunca deben tocar sales, payments ni Caja.
     if (data.items.some((i) => i.tipo_operacion === "presupuesto")) return;
+    // Guard defensivo (la UI ya bloquea el botón): una venta real necesita nombre + teléfono.
+    if (!data.client.name?.trim() || !data.client.phone?.trim()) return;
 
     const clientId = await findOrCreateClient(data.client);
     const myCaja = openCajaOf(cajas, session.id);

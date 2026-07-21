@@ -15,7 +15,7 @@ Repo: `github.com/jesusperd/zappostore`.
 - **Icons**: `lucide-react`. Sin librería de gráficos (los mini-gráficos son un `BarChart` SVG propio).
 - Archivos clave: `src/lib/supabase.js` (cliente Singleton vía `globalThis`), `schema.sql` (fuente de verdad completa del backend, v0.9), `supabase/functions/create-vendor/` y `supabase/functions/update-vendor/` (Edge Functions de alta/edición de vendedores).
 
-## Estado actual (v2.3, al 2026-07-21)
+## Estado actual (v2.4, al 2026-07-21)
 
 **La migración completa de memoria/localStorage → Supabase real terminó.** Todo el flujo operativo diario (login, vendedores, clientes, cajas, pedidos, pedido_items, pagos, fotos de diseño, tasa de cambio) corre contra Postgres real con RLS verificada tabla por tabla. Nada se pierde al refrescar la página, nada queda "por navegador".
 
@@ -51,6 +51,9 @@ RLS: `vendedores`/`clientes`/`audit_log`/`exchange_rates` por rol activo; `cajas
 - **Pago mixto por pedido**: N abonos con métodos distintos hasta cubrir el total. Ledger append-only; corregir/quitar un pago ya guardado genera una **reversión automática** en la misma caja original — nunca update/delete directo. Esta es la lógica más delicada de todo el proyecto (ya auditada y verificada end-to-end dos veces).
 - **Presupuesto vs. Venta**: producto marcado "presupuesto" → botón "Imprimir Presupuesto", no crea pedido ni toca Caja. Intencionalmente no queda registrado en ningún lado (no hay forma de recuperar/reimprimir uno viejo todavía).
 - **Cierre de venta**: solo cierra cuando **todos** los productos están `cerrado`.
+- **Cierre de producto**: un producto solo puede pasar a `cerrado` si ya completó (`*_done`) todos los procesos de Taller/Diseño que eligió (helper `proceduresComplete()`). Si no eligió ninguno, no hay restricción.
+- **Cliente obligatorio en venta real**: nombre + teléfono son obligatorios para cerrar una venta (no para un presupuesto).
+- **Carrito mixto (Venta + Presupuesto)**: al guardar, NO se guarda ningún producto del pedido (ni los de venta real) — se avisa explícito en la UI.
 - **Producto**: Talla (chips) + Cantidad (input simple) + Color libre (texto). Sin formato/peso, sin paleta de colores predefinida.
 - **Zonas de diseño**: Frente/Espalda/Mangas, visión de espejo, "Espalda Completa" es un estado calculado (no una zona real), bidireccional.
 - **Layout**: sidebar fijo (`<aside>`, no drawer/hamburguesa) — target es tablet/desktop de taller, no mobile.
